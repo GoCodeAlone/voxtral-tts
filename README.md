@@ -36,9 +36,13 @@ uv run --with huggingface_hub \
 cargo run --release --features "wgpu,cli,hub" --bin voxtral-transcribe -- \
   --audio audio.wav --model models/voxtral
 
-# Or use the Q4 quantized path (~2.5 GB)
+# To run gguf quantized models,
+# download the models ~2.5GB
+uv run --with huggingface_hub hf download TrevorJS/voxtral-mini-realtime-gguf --local-dir models/
+
+# To transcribe the audio file
 cargo run --release --features "wgpu,cli,hub" --bin voxtral-transcribe -- \
-  --audio audio.wav --gguf models/voxtral-q4.gguf --tokenizer models/voxtral/tekken.json
+  --audio audio.wav --gguf models/voxtral-q4.gguf --tokenizer models/tekken.json
 ```
 
 ### Browser Demo
