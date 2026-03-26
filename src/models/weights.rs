@@ -197,11 +197,13 @@ impl OwnedSafeTensors {
         // while safetensors exists. The mmap stays valid for the struct's lifetime.
         let safetensors = unsafe {
             let static_ref: &'static [u8] = std::mem::transmute(backing.as_ref());
-            SafeTensors::deserialize(static_ref)
-                .context("Failed to deserialize SafeTensors")?
+            SafeTensors::deserialize(static_ref).context("Failed to deserialize SafeTensors")?
         };
 
-        Ok(Self { _backing: backing, safetensors })
+        Ok(Self {
+            _backing: backing,
+            safetensors,
+        })
     }
 
     /// Create from raw bytes (heap-allocated).
@@ -213,11 +215,13 @@ impl OwnedSafeTensors {
         // while safetensors exists. The Arc ensures the bytes live long enough.
         let safetensors = unsafe {
             let static_ref: &'static [u8] = std::mem::transmute(backing.as_ref());
-            SafeTensors::deserialize(static_ref)
-                .context("Failed to deserialize SafeTensors")?
+            SafeTensors::deserialize(static_ref).context("Failed to deserialize SafeTensors")?
         };
 
-        Ok(Self { _backing: backing, safetensors })
+        Ok(Self {
+            _backing: backing,
+            safetensors,
+        })
     }
 
     /// Get a reference to the SafeTensors.

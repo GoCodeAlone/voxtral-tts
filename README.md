@@ -12,7 +12,7 @@ NVIDIA DGX Spark (GB10, LPDDR5x), 16s test audio, 3-run average:
 | Path | Encode | Decode | Total | RTF | Tok/s | Memory |
 |------|--------|--------|-------|-----|-------|--------|
 | **Q4 GGUF native** | 1021 ms | 5578 ms | 6629 ms | **0.416** | **19.4** | 703 MB |
-| F32 native | 887 ms | 23689 ms | 24607 ms | 1.543 | 4.6 | 9.2 GB |
+| BF16 native | 887 ms | 23689 ms | 24607 ms | 1.543 | 4.6 | 9.2 GB |
 | Q4 GGUF WASM | — | — | ~225 s | ~14.1 | ~0.5 | (browser) |
 
 - **RTF** (Real-Time Factor): 0.416 means transcription completes in under half the audio duration
@@ -32,7 +32,7 @@ The Q4 GGUF quantized path (2.5 GB) runs entirely client-side in a browser tab v
 uv run --with huggingface_hub \
   hf download mistralai/Voxtral-Mini-4B-Realtime-2602 --local-dir models/voxtral
 
-# Transcribe an audio file (f32 SafeTensors path)
+# Transcribe an audio file (BF16 SafeTensors path)
 cargo run --release --features "wgpu,cli,hub" --bin voxtral-transcribe -- \
   --audio audio.wav --model models/voxtral
 
@@ -78,7 +78,7 @@ Audio (16kHz mono)
 
 ### Two Inference Paths
 
-| | F32 (native) | Q4 GGUF (native + browser) |
+| | BF16 (native) | Q4 GGUF (native + browser) |
 |---|---|---|
 | Weights | SafeTensors (~9 GB) | GGUF Q4_0 (~2.5 GB) |
 | Linear ops | Burn tensor matmul | Custom WGSL shader (fused dequant + matmul) |
@@ -157,7 +157,7 @@ The dev server and E2E test discover shards automatically from `models/voxtral-q
 ```
 src/
   audio/          # Mel spectrogram, chunking, resampling, padding
-  models/         # F32 model: encoder, decoder, adapter, attention, RoPE, KV cache
+  models/         # BF16 model: encoder, decoder, adapter, attention, RoPE, KV cache
   gguf/           # Q4 GGUF: reader, loader, model, tensor, WGSL shader, tests
   web/            # WASM bindings: VoxtralQ4, initWgpuDevice, async decode loop
   tokenizer/      # Tekken tokenizer wrapper (native only)

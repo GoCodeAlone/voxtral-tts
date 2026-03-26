@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+direct-commits-allowed: true
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
@@ -69,7 +71,7 @@ The `wasm` feature enables both `wgpu` (for burn's WebGPU backend) and `dep:wgpu
 ## Model Weights
 
 ```bash
-# F32 SafeTensors (~9 GB)
+# BF16 SafeTensors (~9 GB)
 uv run --with huggingface_hub hf download mistralai/Voxtral-Mini-4B-Realtime-2602 --local-dir models/voxtral
 
 # Q4 GGUF (~2.5 GB)
@@ -95,11 +97,11 @@ Both the CLI (`src/bin/transcribe.rs`) and WASM (`src/web/bindings.rs`) paths ca
 
 ### Two Inference Paths
 
-**F32 path** (`src/models/`): SafeTensors weights, full precision, native only.
+**BF16 path** (`src/models/`): SafeTensors weights, full precision, native only.
 
 **Q4 GGUF path** (`src/gguf/`): Q4_0 quantized weights, fused GPU dequant+matmul via custom WGSL shader, works in browser.
 
-| Component | F32 | Q4 GGUF |
+| Component | BF16 | Q4 GGUF |
 |-----------|-----|---------|
 | Weight source | SafeTensors | GGUF v2/v3 |
 | Linear layers | Burn tensor matmul | Custom `q4_matmul` (shader.wgsl) |
