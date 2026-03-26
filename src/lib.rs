@@ -25,6 +25,7 @@ pub mod gguf;
 pub mod models;
 pub mod profiling;
 pub mod tokenizer;
+pub mod tts;
 
 #[cfg(feature = "wasm")]
 pub mod web;

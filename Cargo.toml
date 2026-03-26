@@ -92,6 +92,11 @@ path = "src/bin/transcribe.rs"
 required-features = ["cli"]
 
 [[bin]]
+name = "voxtral-speak"
+path = "src/bin/speak.rs"
+required-features = ["cli", "native-tokenizer"]
+
+[[bin]]
 name = "e2e-bench"
 path = "src/bin/e2e_bench.rs"
 required-features = ["wgpu", "cli"]

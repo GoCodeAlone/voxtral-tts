@@ -21,12 +21,12 @@ and voice embedding metadata.
 - Create `src/tts/config.rs` — TTS config structs
 
 **Acceptance criteria:**
-- [ ] `TtsBackboneConfig`: 26 layers, 3072 dim, 32Q/8KV GQA, head_dim 128, FFN 9216, RoPE theta 1M, vocab 131072, tied embeddings
-- [ ] `FmTransformerConfig`: 3 layers, 3072 dim, 32Q/8KV GQA, head_dim 128, FFN 9216, RoPE theta 10K
-- [ ] `CodecDecoderConfig`: block layout, 1024 dim, 8 MHA heads, ALiBi, sliding windows [2, 4, 8, 16]
-- [ ] `TtsSpecialTokens`: `audio_token_id` (24), `begin_audio_token_id` (25), BOS (1)
-- [ ] Voice embedding metadata (preset names, expected dimensions)
-- [ ] Unit tests: round-trip serde, validation rejects invalid configs (zero layers, mismatched dims)
+- [x] `TtsBackboneConfig`: 26 layers, 3072 dim, 32Q/8KV GQA, head_dim 128, FFN 9216, RoPE theta 1M, vocab 131072, tied embeddings
+- [x] `FmTransformerConfig`: 3 layers, 3072 dim, 32Q/8KV GQA, head_dim 128, FFN 9216, RoPE theta 10K
+- [x] `CodecDecoderConfig`: block layout, 1024 dim, 8 MHA heads, ALiBi, sliding windows [2, 4, 8, 16]
+- [x] `TtsSpecialTokens`: `audio_token_id` (24), `begin_audio_token_id` (25), BOS (1)
+- [x] Voice embedding metadata (preset names, expected dimensions)
+- [x] Unit tests: round-trip serde, validation rejects invalid configs (zero layers, mismatched dims)
 
 **Implementation approach:**
 - Mirror existing `src/models/config.rs` patterns for serde parsing
@@ -50,11 +50,11 @@ pre-norm transformer layers.
 - `src/models/layers/decoder_layer.rs` — add enum/config variant
 
 **Acceptance criteria:**
-- [ ] `DecoderLayerConfig` accepts optional `t_cond_dim` — when `None`, no ADA RMSNorm is instantiated
-- [ ] Plain mode forward: `x → attention_norm → attention → + → ffn_norm → ffn → +`
-- [ ] Existing ASR path (`t_cond_dim = Some(32)`) continues working unchanged
-- [ ] Mode determined at construction time — no runtime branch per forward call (use enum dispatch or separate struct)
-- [ ] Unit tests: both modes produce correct output shapes; plain mode forward doesn't require `t_embed` argument
+- [x] `DecoderLayerConfig` accepts optional `t_cond_dim` — when `None`, no ADA RMSNorm is instantiated
+- [x] Plain mode forward: `x → attention_norm → attention → + → ffn_norm → ffn → +`
+- [x] Existing ASR path (`t_cond_dim = Some(32)`) continues working unchanged
+- [x] Mode determined at construction time — no runtime branch per forward call (use enum dispatch or separate struct)
+- [x] Unit tests: both modes produce correct output shapes; plain mode forward doesn't require `t_embed` argument
 
 **Implementation approach:**
 - Add an enum `NormMode { Plain, Ada(AdaRmsNorm) }` inside `DecoderLayer`
@@ -82,12 +82,12 @@ decoder layers. Reuse existing `weights.rs` loading utilities.
 - Modify `src/tts/mod.rs` — export
 
 **Acceptance criteria:**
-- [ ] Loads 26 layers: `layers.{0..25}.attention.{wq,wk,wv,wo}.weight`, `attention_norm.weight`, `feed_forward.{w1,w2,w3}.weight`, `ffn_norm.weight`
-- [ ] Loads `norm.weight` (final RMSNorm)
-- [ ] Loads `tok_embeddings.weight` [131072, 3072] — shared as LM head (tied embeddings)
-- [ ] Loads `audio_codebook_embeddings.embeddings.weight` [9088, 3072]
-- [ ] All weights BF16 (or converted to F32 per backend)
-- [ ] Integration test: load weights from safetensors file, verify all tensor shapes match config
+- [x] Loads 26 layers: `layers.{0..25}.attention.{wq,wk,wv,wo}.weight`, `attention_norm.weight`, `feed_forward.{w1,w2,w3}.weight`, `ffn_norm.weight`
+- [x] Loads `norm.weight` (final RMSNorm)
+- [x] Loads `tok_embeddings.weight` [131072, 3072] — shared as LM head (tied embeddings)
+- [x] Loads `audio_codebook_embeddings.embeddings.weight` [9088, 3072]
+- [x] All weights BF16 (or converted to F32 per backend)
+- [x] Integration test: load weights from safetensors file, verify all tensor shapes match config
 
 **Implementation approach:**
 - Backbone struct holds: `Vec<DecoderLayer>` (plain mode), final `RmsNorm`, `tok_embeddings`, `audio_codebook_embeddings`
@@ -110,12 +110,12 @@ Load pre-encoded voice reference embeddings from `.pt` files and expose them as
 - Create `src/tts/voice.rs` — voice preset loading
 
 **Acceptance criteria:**
-- [ ] Reads SafeTensors voice embedding files (variable-length [N, 3072] BF16)
-- [ ] Supports all 20 preset voices from `voice_embedding/*.safetensors`
-- [ ] Voice embeddings in backbone hidden space — no projection needed
+- [x] Reads SafeTensors voice embedding files (variable-length [N, 3072] BF16)
+- [x] Supports all 20 preset voices from `voice_embedding/*.safetensors`
+- [x] Voice embeddings in backbone hidden space — no projection needed
 - [ ] CLI accepts `--voice <preset_name>` to select
-- [ ] Error on missing/corrupt voice file with actionable message
-- [ ] Unit test: load a known voice file, verify shape is [N, 3072]
+- [x] Error on missing/corrupt voice file with actionable message
+- [x] Unit test: load a known voice file, verify shape is [N, 3072]
 
 **Implementation approach:**
 - **Decided:** Pre-convert `.pt` → SafeTensors via Python script (`scripts/convert_voice_embeds.py`).
@@ -140,16 +140,16 @@ semantic VQ, acoustic FSQ, and special tokens.
 - Create `src/tts/embeddings.rs` — audio codebook embedding lookup + summing logic
 
 **Acceptance criteria:**
-- [ ] Correct index layout with per-codebook special token offsets:
+- [x] Correct index layout with per-codebook special token offsets:
   - Indices 0..1: semantic specials (EMPTY_AUDIO=0, END_AUDIO=1)
   - Indices 2..8193: semantic VQ (8192 entries, offset by +2)
   - Per acoustic codebook: 2 specials + 21 FSQ levels (stride = 23 per codebook)
   - Indices 8194..9021: 36 acoustic codebooks × 23 entries each
   - Indices 9022..9087: alignment padding (unused zeros)
-- [ ] Per-frame embedding: **sums** all 37 embeddings (1 semantic + 36 acoustic) into one 3072-dim vector
-- [ ] Indexing: `semantic_global = raw_semantic_idx + 2`, `acoustic_global = 8194 + cb * 23 + (level + 2)`
-- [ ] Helper to convert (semantic_idx, acoustic_indices[36]) → summed embedding
-- [ ] Unit test: known indices produce expected embedding values, specials return correct embeddings
+- [x] Per-frame embedding: **sums** all 37 embeddings (1 semantic + 36 acoustic) into one 3072-dim vector
+- [x] Indexing: `semantic_global = raw_semantic_idx + 2`, `acoustic_global = 8194 + cb * 23 + (level + 2)`
+- [x] Helper to convert (semantic_idx, acoustic_indices[36]) → summed embedding
+- [x] Unit test: known indices produce expected embedding values, specials return correct embeddings
 
 **Implementation approach:**
 - Embedding table loaded from `audio_codebook_embeddings.embeddings.weight` (T-03 loads it)
@@ -173,13 +173,13 @@ format: `[BOS] [voice_embed_0..N] [<next>=25] [text_tok_0..M] [<repeat>=24] [gen
 - Create `src/tts/sequence.rs` — input sequence builder
 
 **Acceptance criteria:**
-- [ ] Correct sequence format per spec
-- [ ] Text tokenized with existing Tekken tokenizer (vocab 131072)
-- [ ] Voice embeddings inserted as raw [3072] vectors (not looked up from any table)
-- [ ] Text tokens embedded via `tok_embeddings.weight`
-- [ ] Special tokens (`BOS`, `<next>`, `<repeat>`) embedded via `tok_embeddings.weight`
-- [ ] Returns: tensor [1, seq_len, 3072] ready for backbone input
-- [ ] Unit test: verify sequence shape and token positions for known input
+- [x] Correct sequence format per spec
+- [x] Text tokenized with existing Tekken tokenizer (vocab 131072)
+- [x] Voice embeddings inserted as raw [3072] vectors (not looked up from any table)
+- [x] Text tokens embedded via `tok_embeddings.weight`
+- [x] Special tokens (`BOS`, `<next>`, `<repeat>`) embedded via `tok_embeddings.weight`
+- [x] Returns: tensor [1, seq_len, 3072] ready for backbone input
+- [x] Unit test: verify sequence shape and token positions for known input
 
 **Implementation approach:**
 - Accept: voice embeddings [N, 3072], text token IDs Vec<u32>, config (special token IDs)
@@ -206,15 +206,15 @@ token generation.
 - `src/tts/backbone.rs` — add autoregressive forward loop
 
 **Acceptance criteria:**
-- [ ] KV-cache enabled autoregressive decoding (reuse existing `kv_cache.rs`)
-- [ ] Prefill phase: process entire input sequence at once, cache KV
-- [ ] Decode phase: one token at a time, producing hidden state `h` [1, 1, 3072]
-- [ ] Hidden state `h` passed to FM transformer for:
+- [x] KV-cache enabled autoregressive decoding (reuse existing `kv_cache.rs`)
+- [x] Prefill phase: process entire input sequence at once, cache KV
+- [x] Decode phase: one token at a time, producing hidden state `h` [1, 1, 3072]
+- [x] Hidden state `h` passed to FM transformer for:
   - Semantic logits: `semantic_codebook_output(h)` — direct projection, no FM layers
   - Acoustic tokens: Euler ODE through FM transformer layers
-- [ ] Generated audio tokens embedded via audio codebook (T-05) and fed back as next input
-- [ ] Terminates on EOA token (from semantic logits argmax) or configurable max-length limit
-- [ ] Integration test: generates non-degenerate hidden state sequences from known input
+- [x] Generated audio tokens embedded via audio codebook (T-05) and fed back as next input
+- [x] Terminates on EOA token (from semantic logits argmax) or configurable max-length limit
+- [x] Integration test: generates non-degenerate hidden state sequences from known input
 
 **Implementation approach:**
 - Prefill: forward all input embeddings through 26 layers, cache KV states
@@ -238,18 +238,18 @@ but the weight (`semantic_codebook_output`) is namespaced here.
 - Create `src/tts/flow_matching.rs` — FM transformer struct + forward
 
 **Acceptance criteria:**
-- [ ] 3 bidirectional (non-causal) transformer layers with GQA (32Q/8KV)
-- [ ] RoPE with theta=10K (distinct from backbone's 1M)
-- [ ] Per-frame input sequence (length 3):
+- [x] 3 bidirectional (non-causal) transformer layers with GQA (32Q/8KV)
+- [x] RoPE with theta=10K (distinct from backbone's 1M)
+- [x] Per-frame input sequence (length 3):
   - Position 0: current acoustic state `x_t` via `input_projection` [3072, 36]
   - Position 1: sinusoidal time embedding `t` via `time_projection` [3072→3072]
   - Position 2: backbone hidden `h` via `llm_projection` [3072→3072]
-- [ ] `predict_velocity()`: runs FM layers, returns `acoustic_codebook_output(hidden[:, 0, :])` → velocity in R^36
-- [ ] `semantic_logits()`: direct `semantic_codebook_output(h)` → [8320] logits (no FM layers)
+- [x] `predict_velocity()`: runs FM layers, returns `acoustic_codebook_output(hidden[:, 0, :])` → velocity in R^36
+- [x] `semantic_logits()`: direct `semantic_codebook_output(h)` → [8320] logits (no FM layers)
   - Mask `EMPTY_AUDIO` (idx 0) to -inf
   - Mask indices ≥ (2 + 8192) to -inf (beyond valid semantic range)
-- [ ] Loads all 33 FM transformer tensors from safetensors (prefix: `acoustic_transformer.`)
-- [ ] Unit test: correct output shapes for known hidden state input
+- [x] Loads all 33 FM transformer tensors from safetensors (prefix: `acoustic_transformer.`)
+- [x] Unit test: correct output shapes for known hidden state input
 
 **Implementation approach:**
 - Reuse existing `Attention`, `SwiGLU`, `RmsNorm`, `RoPE` layers
@@ -273,9 +273,9 @@ Implement sinusoidal positional encoding for the flow-matching time step scalar
 - Create function in `src/tts/flow_matching.rs` (or separate small module)
 
 **Acceptance criteria:**
-- [ ] Generates 3072-dim sinusoidal embedding for scalar time value `t ∈ [0, 1]`
-- [ ] Output projected through `time_projection` [3072→3072] before use
-- [ ] Unit test: verify embedding properties (different times produce different embeddings, correct dimensionality)
+- [x] Generates 3072-dim sinusoidal embedding for scalar time value `t ∈ [0, 1]`
+- [x] Output projected through `time_projection` [3072→3072] before use
+- [x] Unit test: verify embedding properties (different times produce different embeddings, correct dimensionality)
 
 **Implementation approach:**
 - **Decided:** Reuse existing `src/models/time_embedding.rs` directly. It already supports
@@ -301,15 +301,15 @@ guidance (CFG alpha=1.2) to predict acoustic tokens from backbone hidden states.
 - Add to `src/tts/flow_matching.rs` — Euler solver function
 
 **Acceptance criteria:**
-- [ ] Samples initial noise `x_1 ~ N(0, 1)` in R^36
-- [ ] 8 Euler steps: `t` in [1.0, 0.875, ..., 0.125], `dt = 1/8`
-- [ ] Per step:
+- [x] Samples initial noise `x_1 ~ N(0, 1)` in R^36
+- [x] 8 Euler steps: `t` in [1.0, 0.875, ..., 0.125], `dt = 1/8`
+- [x] Per step:
   - `v_cond = FM(x_t, t, h)` — conditional velocity
   - `v_uncond = FM(x_t, t, zeros)` — unconditional velocity (zeroed hidden state)
   - `v = 1.2 * v_cond + (1 - 1.2) * v_uncond` — CFG
   - `x_{t-dt} = x_t - v * dt`
-- [ ] Final `x_0` returned for FSQ quantization
-- [ ] Unit test: ODE solver converges for fixed noise seed (deterministic with seeded RNG)
+- [x] Final `x_0` returned for FSQ quantization
+- [x] Unit test: ODE solver converges for fixed noise seed (deterministic with seeded RNG)
 
 **Implementation approach:**
 - Each step calls the FM transformer twice (cond + uncond) — the main perf bottleneck
@@ -332,10 +332,10 @@ levels per dimension. Used after the Euler ODE solver and for codec decoder inpu
 - Create `src/tts/codec/quantizer.rs` — FSQ + VQ quantization
 
 **Acceptance criteria:**
-- [ ] Maps each of 36 dimensions to nearest of 21 uniformly-spaced levels
-- [ ] Produces integer indices [0..20] per dimension (36 indices total per frame)
-- [ ] Inverse dequantization: integer indices → continuous values (for codec decoder input)
-- [ ] Unit test: round-trip quantize→dequantize preserves values at level boundaries
+- [x] Maps each of 36 dimensions to nearest of 21 uniformly-spaced levels
+- [x] Produces integer indices [0..20] per dimension (36 indices total per frame)
+- [x] Inverse dequantization: integer indices → continuous values (for codec decoder input)
+- [x] Unit test: round-trip quantize→dequantize preserves values at level boundaries
 
 **Implementation approach:**
 - 21 levels uniformly in [-1, 1]: `levels = linspace(-1, 1, 21)`
@@ -359,10 +359,10 @@ token IDs to 256-dim embedding vectors for the codec decoder.
 - `src/tts/codec/quantizer.rs` — add VQ codebook lookup
 
 **Acceptance criteria:**
-- [ ] Loads `audio_tokenizer.quantizer.semantic_codebook.embedding_sum` [8192, 256] and `cluster_usage` [8192]
-- [ ] Lookup: semantic token index → 256-dim embedding vector
-- [ ] Normalization: `embedding = embedding_sum[idx] / cluster_usage[idx]` (EMA codebook)
-- [ ] Unit test: known index produces expected embedding
+- [x] Loads `audio_tokenizer.quantizer.semantic_codebook.embedding_sum` [8192, 256] and `cluster_usage` [8192]
+- [x] Lookup: semantic token index → 256-dim embedding vector
+- [x] Normalization: `embedding = embedding_sum[idx] / cluster_usage[idx]` (EMA codebook)
+- [x] Unit test: known index produces expected embedding
 
 **Implementation approach:**
 - Load two tensors from safetensors
@@ -385,11 +385,11 @@ Replaces RoPE in the codec with relative position bias.
 - Create `src/tts/codec/alibi.rs`
 
 **Acceptance criteria:**
-- [ ] Computes per-head bias: `bias[h, i, j] = slope[h] * (j - i)` for relative positions
-- [ ] Slopes from geometric sequence: `slope[h] = 2^(-8h/n_heads)` for h in 0..n_heads
-- [ ] No learned parameters — purely computed from head count
-- [ ] Compatible with causal + sliding window masking (bias added before masking)
-- [ ] Unit test: verify bias matrix shape [n_heads, seq_len, seq_len] and values for 8 heads
+- [x] Computes per-head bias: `bias[h, i, j] = slope[h] * (j - i)` for relative positions
+- [x] Slopes from geometric sequence: `slope[h] = 2^(-8h/n_heads)` for h in 0..n_heads
+- [x] No learned parameters — purely computed from head count
+- [x] Compatible with causal + sliding window masking (bias added before masking)
+- [x] Unit test: verify bias matrix shape [n_heads, seq_len, seq_len] and values for 8 heads
 
 **Implementation approach:**
 - Pre-compute slope vector once at construction
@@ -412,10 +412,10 @@ the codec decoder layers.
 - Create `src/tts/codec/qk_norm.rs` — or extend existing attention module
 
 **Acceptance criteria:**
-- [ ] Applies RMSNorm to Q and K using learned `q_norm.weight` [1024] and `k_norm.weight` [1024]
-- [ ] Weights are per head_dim element, shared across heads (since n_heads * head_dim = 1024)
-- [ ] Normalized Q/K used for score computation: `Q_normed @ K_normed^T / sqrt(head_dim)`
-- [ ] Unit test: verify normalization changes attention scores correctly
+- [x] Applies RMSNorm to Q and K using learned `q_norm.weight` [1024] and `k_norm.weight` [1024]
+- [x] Weights are per head_dim element, shared across heads (since n_heads * head_dim = 1024)
+- [x] Normalized Q/K used for score computation: `Q_normed @ K_normed^T / sqrt(head_dim)`
+- [x] Unit test: verify normalization changes attention scores correctly
 
 **Implementation approach:**
 - After projecting Q and K through wq/wk, reshape to [batch, n_heads, seq, head_dim]
@@ -439,10 +439,10 @@ decoder.
 - Create `src/tts/codec/layer_scale.rs`
 
 **Acceptance criteria:**
-- [ ] `x = x + attention_scale * attention(norm(x))` — element-wise channel scaling
-- [ ] `x = x + ffn_scale * ffn(ffn_norm(x))` — element-wise channel scaling
-- [ ] Loads `attention_scale` [1024] and `ffn_scale` [1024] per layer
-- [ ] Unit test: scaling modifies residual contribution correctly
+- [x] `x = x + attention_scale * attention(norm(x))` — element-wise channel scaling
+- [x] `x = x + ffn_scale * ffn(ffn_norm(x))` — element-wise channel scaling
+- [x] Loads `attention_scale` [1024] and `ffn_scale` [1024] per layer
+- [x] Unit test: scaling modifies residual contribution correctly
 
 **Implementation approach:**
 - Simple: `LayerScale` struct holds a 1D weight tensor [dim]
@@ -465,12 +465,12 @@ stored as (magnitude `g`, direction `v`) and fused at load time.
 - Create `src/tts/codec/conv.rs`
 
 **Acceptance criteria:**
-- [ ] Weight norm fusion at load: `weight = g * v / ||v||` per output channel
+- [x] Weight norm fusion at load: `weight = g * v / ||v||` per output channel
   - `g` (original0): [C_out, 1, 1] magnitude
   - `v` (original1): [C_out, C_in, K] direction
-- [ ] Causal padding: left-pad by `(K - S)`, no right padding
-- [ ] Correct shapes: block 0 [1024, 292, 3] stride 1; output [240, 1024, 7] stride 1
-- [ ] Unit test: causal property — output[t] depends only on input[≤t]
+- [x] Causal padding: left-pad by `(K - S)`, no right padding
+- [x] Correct shapes: block 0 [1024, 292, 3] stride 1; output [240, 1024, 7] stride 1
+- [x] Unit test: causal property — output[t] depends only on input[≤t]
 
 **Implementation approach:**
 - Fuse weights at load time into a standard Conv1d weight tensor
@@ -492,11 +492,11 @@ Implement causal transposed convolution for codec decoder upsampling stages.
 - `src/tts/codec/conv.rs` — add ConvTranspose1d
 
 **Acceptance criteria:**
-- [ ] Weight norm fusion (same as T-16 but kernel shape [C_in, C_out, K])
-- [ ] Causal output trimming: remove `(K - S)` samples from right of output
-- [ ] Correct shapes: [1024, 1024, 4], stride 2 for all three upsample blocks
-- [ ] Each block produces 2x temporal upsampling
-- [ ] Unit test: output length = input_length * stride after trimming
+- [x] Weight norm fusion (same as T-16 but kernel shape [C_in, C_out, K])
+- [x] Causal output trimming: remove `(K - S)` samples from right of output
+- [x] Correct shapes: [1024, 1024, 4], stride 2 for all three upsample blocks
+- [x] Each block produces 2x temporal upsampling
+- [x] Unit test: output length = input_length * stride after trimming
 
 **Implementation approach:**
 - **Decided:** Burn 0.20 has `ConvTranspose1dConfig` in `burn::nn::conv`. Use directly
@@ -520,11 +520,11 @@ SwiGLU, and causal+sliding-window attention.
 - Create `src/tts/codec/mod.rs` — module root
 
 **Acceptance criteria:**
-- [ ] Transformer layer: pre-norm → attention (ALiBi, QK-norm, causal, sliding window) → LayerScale → residual → pre-norm → SwiGLU → LayerScale → residual
-- [ ] 8 MHA heads, 1024 dim, head_dim 128
-- [ ] Sliding window parameter per block (2, 4, 8, 16)
-- [ ] Loads all per-layer weights from safetensors (attention, norms, scales, FFN)
-- [ ] Unit test: correct output shape for known input
+- [x] Transformer layer: pre-norm → attention (ALiBi, QK-norm, causal, sliding window) → LayerScale → residual → pre-norm → SwiGLU → LayerScale → residual
+- [x] 8 MHA heads, 1024 dim, head_dim 128
+- [x] Sliding window parameter per block (2, 4, 8, 16)
+- [x] Loads all per-layer weights from safetensors (attention, norms, scales, FFN)
+- [x] Unit test: correct output shape for known input
 
 **Implementation approach:**
 - Codec attention differs from backbone: MHA (not GQA), ALiBi (not RoPE), QK-norm, LayerScale
@@ -547,12 +547,12 @@ blocks) → output projection → waveform reshape.
 - `src/tts/codec/mod.rs` — `CodecDecoder` struct + full forward
 
 **Acceptance criteria:**
-- [ ] Pipeline: quantized tokens (292-dim) → Conv1d project up [292→1024] → 4x (2 transformer layers + ConvTranspose1d upsample) → output Conv1d [1024→240] → reshape
-- [ ] Sliding windows: [2, 4, 8, 16] across the four transformer block groups
-- [ ] Total upsampling: 8x (from 12.5 Hz to 100 Hz)
-- [ ] Output: 240 samples per patch × 100 Hz = 24,000 Hz
-- [ ] Loads all 117 codec decoder tensors with weight norm fusion
-- [ ] Integration test: feed known token sequence through, verify output is 24 kHz audio samples
+- [x] Pipeline: quantized tokens (292-dim) → Conv1d project up [292→1024] → 4x (2 transformer layers + ConvTranspose1d upsample) → output Conv1d [1024→240] → reshape
+- [x] Sliding windows: [2, 4, 8, 16] across the four transformer block groups
+- [x] Total upsampling: 8x (from 12.5 Hz to 100 Hz)
+- [x] Output: 240 samples per patch × 100 Hz = 24,000 Hz
+- [x] Loads all 117 codec decoder tensors with weight norm fusion
+- [x] Integration test: feed known token sequence through, verify output is 24 kHz audio samples
 
 **Implementation approach:**
 - `CodecDecoder` holds: input conv, 4x (Vec<CodecTransformerLayer>, ConvTranspose1d), output conv
@@ -575,8 +575,8 @@ already uses `audio.sample_rate` in the WAV header — no hardcoded 16 kHz.
 - `src/audio/io.rs` — add 24 kHz round-trip test only
 
 **Acceptance criteria:**
-- [ ] Unit test: write and read-back 24 kHz WAV, verify sample rate and data integrity
-- [ ] Verify output is playable by standard tools
+- [x] Unit test: write and read-back 24 kHz WAV, verify sample rate and data integrity
+- [x] Verify output is playable by standard tools
 
 **Implementation approach:**
 - **Verified:** `save_wav()` at `io.rs:137` already writes `sample_rate: audio.sample_rate`
@@ -598,9 +598,9 @@ Wire all stages into a single text-to-speech pipeline function.
 - Create `src/tts/pipeline.rs` — orchestrator
 
 **Acceptance criteria:**
-- [ ] Input: text string + voice preset name + model path
-- [ ] Output: `AudioBuffer` at 24 kHz
-- [ ] Pipeline steps:
+- [x] Input: text string + voice preset name + model path
+- [x] Output: `AudioBuffer` at 24 kHz
+- [x] Pipeline steps:
   1. Tokenize text (Tekken)
   2. Load voice embedding
   3. Build input sequence (T-06)
@@ -609,9 +609,9 @@ Wire all stages into a single text-to-speech pipeline function.
   6. Collect all token frames
   7. Codec decode → waveform (T-19)
   8. Wrap as AudioBuffer at 24 kHz
-- [ ] Handles variable-length text
-- [ ] Terminates on EOA or max length
-- [ ] Integration test: generate audio from known text, verify non-silent output
+- [x] Handles variable-length text
+- [x] Terminates on EOA or max length
+- [x] Integration test: generate audio from known text, verify non-silent output
 
 **Implementation approach:**
 - `TtsPipeline` struct holds backbone, FM transformer, codec decoder, tokenizer, config
@@ -635,12 +635,12 @@ Build a CLI binary for TTS inference, mirroring the style of `voxtral-transcribe
 - Modify `Cargo.toml` — add `[[bin]]` entry
 
 **Acceptance criteria:**
-- [ ] `cargo run --features "wgpu,cli,hub" --bin voxtral-speak -- --text "Hello" --voice casual_female`
-- [ ] Required args: `--text`, `--voice`, `--model` (path to consolidated.safetensors)
-- [ ] Optional: `--output` (WAV path, default auto-named), `--tokenizer` (Tekken path)
-- [ ] `--list-voices` lists available voice presets
-- [ ] Progress indication during generation (indicatif spinner/progress bar)
-- [ ] Feature-gated behind `cli` flag
+- [x] `cargo run --features "wgpu,cli,hub" --bin voxtral-speak -- --text "Hello" --voice casual_female`
+- [x] Required args: `--text`, `--voice`, `--model` (path to consolidated.safetensors)
+- [x] Optional: `--output` (WAV path, default auto-named), `--tokenizer` (Tekken path)
+- [x] `--list-voices` lists available voice presets
+- [x] Progress indication during generation (tracing info logs)
+- [x] Feature-gated behind `cli` + `native-tokenizer` flags
 
 **Implementation approach:**
 - Mirror `src/bin/transcribe.rs` structure
@@ -660,12 +660,12 @@ Verify that all shared layers are genuinely reused (not duplicated) and that TTS
 code is properly separated from ASR code.
 
 **Acceptance criteria:**
-- [ ] Backbone uses `attention.rs`, `swiglu.rs`, `rms_norm.rs`, `rope.rs`, `kv_cache.rs` from `src/models/layers/`
-- [ ] FM transformer reuses same primitives
-- [ ] Tokenizer path shared with ASR
-- [ ] New types (ALiBi, QK-norm, LayerScale, conv) are in `src/tts/codec/` and generic
-- [ ] No TTS-specific changes leak into the ASR inference path
-- [ ] TTS module lives in `src/tts/`, codec in `src/tts/codec/`
+- [x] Backbone uses `attention.rs`, `swiglu.rs`, `rms_norm.rs`, `rope.rs`, `kv_cache.rs` from `src/models/layers/`
+- [x] FM transformer reuses same primitives
+- [x] Tokenizer path shared with ASR
+- [x] New types (ALiBi, QK-norm, LayerScale, conv) are in `src/tts/codec/` and generic
+- [x] No TTS-specific changes leak into the ASR inference path
+- [x] TTS module lives in `src/tts/`, codec in `src/tts/codec/`
 
 **Implementation approach:**
 - Review pass after all other tasks complete
