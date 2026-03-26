@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.1
+
+### Fixed
+
+- **Incorrect `head_dim` in LanguageModel constructors.** `head_dim` was computed
+  as `d_model / n_heads` (96), but the Voxtral decoder config specifies
+  `head_dim = 128` — an independent parameter with GQA (32Q/8KV). This caused a
+  tensor shape mismatch in KV cache pre-allocation during inference.
+  Contributed by [@johnnyshields](https://github.com/johnnyshields) in [#6](https://github.com/TrevorS/voxtral-mini-realtime-rs/pull/6).
+
+- **OOM when loading large SafeTensors models.** Switched from reading the entire
+  file into a `Vec<u8>` to memory-mapping via `mmap`, eliminating a redundant
+  copy and keeping peak memory close to the model size.
+  Contributed by [@johnnyshields](https://github.com/johnnyshields) in [#6](https://github.com/TrevorS/voxtral-mini-realtime-rs/pull/6).
+
+### Changed
+
+- Corrected documentation to say BF16 (not F32) for SafeTensors weight precision —
+  9 GB / 4B params = ~2.25 bytes/param = BF16, matching the HuggingFace model page.
+  ([#5](https://github.com/TrevorS/voxtral-mini-realtime-rs/issues/5))
+
+- Improved GGUF local usage documentation.
+  Contributed by [@swarnimarun](https://github.com/swarnimarun) in [#8](https://github.com/TrevorS/voxtral-mini-realtime-rs/pull/8).
+
 ## 0.2.0
 
 > Performance numbers measured on NVIDIA DGX Spark (GB10, LPDDR5x) for Vulkan,
@@ -56,7 +80,7 @@
 
 Initial release of Voxtral Mini 4B Realtime in Rust.
 
-- Native CLI for streaming ASR via Vulkan/Metal (F32 SafeTensors path)
+- Native CLI for streaming ASR via Vulkan/Metal (BF16 SafeTensors path)
 - Q4 GGUF quantized inference path (~2.5 GB) for native and browser
 - WASM + WebGPU browser demo with client-side model loading
 - Custom WGSL shader for fused Q4 dequantization + matrix multiplication
