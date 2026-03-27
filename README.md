@@ -3,7 +3,7 @@
 [![HuggingFace](https://img.shields.io/badge/%F0%9F%A4%97-Model_on_HuggingFace-yellow)](https://huggingface.co/TrevorJS/voxtral-mini-realtime-gguf)
 [![Live Demo](https://img.shields.io/badge/%F0%9F%94%8A-Live_Demo-blue)](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime)
 
-Streaming speech recognition running natively and in the browser. A pure Rust implementation of [Mistral's Voxtral Mini 4B Realtime](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) model using the [Burn](https://burn.dev) ML framework.
+Streaming speech recognition and text-to-speech running natively and in the browser. A pure Rust implementation of Mistral's [Voxtral Mini 4B Realtime](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) (ASR) and [Voxtral 4B TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) models using the [Burn](https://burn.dev) ML framework.
 
 ## Benchmarks
 
@@ -64,6 +64,23 @@ Open `https://localhost:8443`, accept the certificate, and click **Load from Ser
 
 [Hosted demo on HuggingFace Spaces](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime) if you want to skip local setup.
 
+### Text-to-Speech
+
+```bash
+# Download TTS model weights (~8 GB)
+uv run --with huggingface_hub \
+  hf download mistralai/Voxtral-4B-TTS-2603 --local-dir models/voxtral-tts
+
+# Synthesize speech
+cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- \
+  --text "Hello world" --voice casual_female --output hello.wav
+
+# List available voices
+cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- --list-voices
+```
+
+20 preset voices across 9 languages. The TTS pipeline runs backbone (Ministral 3B) autoregressive decoding, flow-matching acoustic prediction, and codec synthesis to produce 24 kHz audio.
+
 ## Architecture
 
 ```
@@ -119,7 +136,7 @@ wasm-pack build --target web --no-default-features --features wasm
 | Feature | Description |
 |---------|-------------|
 | `wgpu` (default) | GPU backend via Burn/CubeCL (WebGPU, Vulkan, Metal) |
-| `native-tokenizer` (default) | Tekken tokenizer (C deps, not WASM-compatible) |
+| `native-tokenizer` (default) | Tekken BPE encoding via tiktoken (WASM-compatible) |
 | `wasm` | Browser support: wasm-bindgen, WebGPU device init, JS bindings |
 | `cli` | CLI binary with clap + indicatif |
 | `hub` | HuggingFace Hub model downloads |
@@ -160,8 +177,10 @@ src/
   models/         # BF16 model: encoder, decoder, adapter, attention, RoPE, KV cache
   gguf/           # Q4 GGUF: reader, loader, model, tensor, WGSL shader, tests
   web/            # WASM bindings: VoxtralQ4, initWgpuDevice, async decode loop
-  tokenizer/      # Tekken tokenizer wrapper (native only)
-  bin/transcribe  # CLI binary
+  tts/            # TTS pipeline: backbone, flow matching, codec, voice presets
+  tokenizer/      # Tekken tokenizer: decode (ASR) + encode (TTS via tiktoken)
+  bin/transcribe  # ASR CLI binary
+  bin/speak       # TTS CLI binary
 
 web/              # Browser demo: index.html, worker.js, voxtral-client.js
 tests/            # Integration tests + Playwright E2E spec

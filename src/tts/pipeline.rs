@@ -5,9 +5,9 @@
 //!
 //! ## Pipeline stages
 //!
-//! 1. **Tokenize** text via HuggingFace `tokenizers` crate
+//! 1. **Tokenize** text via `TekkenEncoder` (tiktoken-rs)
 //! 2. **Load voice** embeddings from SafeTensors preset
-//! 3. **Build input sequence**: `[BOS, voice_embeds, <next>, text_tokens, <repeat>]`
+//! 3. **Build input sequence**: `[BOS, BEGIN_AUDIO, voice, NEXT_AUDIO_TEXT, text, REPEAT_AUDIO_TEXT, BEGIN_AUDIO]`
 //! 4. **Backbone** prefill + autoregressive decode → `Vec<GeneratedFrame>`
 //! 5. **Codec decode**: semantic + acoustic indices → 24 kHz waveform
 
