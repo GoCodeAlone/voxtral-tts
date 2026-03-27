@@ -24,8 +24,18 @@ fn bench_q4_tts_fox() {
     run_bench(
         "The quick brown fox jumps over the lazy dog",
         300,
-        "fox",
-        None,
+        "fox_e4",
+        Some(4),
+    );
+}
+
+#[test]
+fn bench_q4_tts_fox_e3() {
+    run_bench(
+        "The quick brown fox jumps over the lazy dog",
+        300,
+        "fox_e3",
+        Some(3),
     );
 }
 
@@ -38,7 +48,7 @@ fn bench_q4_tts_euler_steps() {
     }
 
     // Run with different step counts to find the quality/speed sweet spot
-    for steps in [8, 6, 4, 3] {
+    for steps in [8, 4, 3, 2] {
         run_bench(
             "Mary had a little lamb",
             300,

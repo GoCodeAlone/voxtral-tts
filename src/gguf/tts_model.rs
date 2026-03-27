@@ -270,7 +270,7 @@ impl Q4TtsBackbone {
         // Stage timing accumulators
         let mut semantic_ms = 0u128;
         let mut euler_ms = 0u128;
-        let mut readback_ms = 0u128;
+        let readback_ms = 0u128;
         let mut backbone_ms = 0u128;
 
         // Phase 1: Prefill — process the entire input sequence, populate KV caches.
@@ -281,48 +281,44 @@ impl Q4TtsBackbone {
         let prefill_ms = t0.elapsed().as_millis();
 
         // Phase 2: Decode loop — one frame per iteration.
+        //
+        // Dispatch semantic + euler in parallel before readback (both use h.clone()).
+        // Single GPU sync per frame flushes all queued work.
         for frame_idx in 0..max_frames {
-            // Semantic token
-            let t1 = Instant::now();
+            let t_frame = Instant::now();
+
+            // Dispatch semantic + euler together (no sync yet)
             let semantic_logits = fm.semantic_logits(h.clone());
-            let semantic_idx = semantic_logits.argmax(1);
-            semantic_ms += t1.elapsed().as_millis();
+            let semantic_idx_f32 = semantic_logits.argmax(1).float(); // [1, 1] as f32
 
-            // Async GPU readback
-            let t2 = Instant::now();
-            let semantic_idx_val: i32 = Tensor::<Wgpu, 2, Int>::into_data_async(semantic_idx)
-                .await
-                .map_err(|e| format!("Failed to read semantic index: {e}"))?
-                .to_vec::<i32>()
-                .map_err(|e| format!("Failed to extract semantic data: {e}"))?[0];
-            let semantic_idx_val = semantic_idx_val as usize;
-            readback_ms += t2.elapsed().as_millis();
-
-            if semantic_idx_val == 1 {
-                tracing::info!(frame = frame_idx, "END_AUDIO token detected, stopping");
-                break;
-            }
-
-            // Euler ODE solve (batched CFG)
-            let t3 = Instant::now();
             let noise: Tensor<Wgpu, 2> = Tensor::random(
                 [1, acoustic_dim],
                 burn::tensor::Distribution::Normal(0.0, 1.0),
                 &self.device,
             );
             let acoustic_raw = fm.euler_ode_solve(h.clone(), noise);
-            let acoustic_indices = Fsq::quantize(acoustic_raw);
-            euler_ms += t3.elapsed().as_millis();
+            let acoustic_indices = Fsq::quantize(acoustic_raw); // [1, 36]
 
-            // Async readback for acoustic data
-            let t4 = Instant::now();
-            let acoustic_data = Tensor::<Wgpu, 2>::into_data_async(acoustic_indices)
+            // Fused readback: concat [semantic_idx(1), acoustic(36)] → single transfer
+            let combined = Tensor::cat(vec![semantic_idx_f32, acoustic_indices], 1); // [1, 37]
+            let combined_data = Tensor::<Wgpu, 2>::into_data_async(combined)
                 .await
-                .map_err(|e| format!("Failed to read acoustic indices: {e}"))?;
-            let acoustic_slice = acoustic_data
+                .map_err(|e| format!("Failed to read combined data: {e}"))?;
+            let combined_slice = combined_data
                 .as_slice::<f32>()
-                .map_err(|e| format!("Failed to extract acoustic data: {e}"))?;
-            readback_ms += t4.elapsed().as_millis();
+                .map_err(|e| format!("Failed to extract combined data: {e}"))?;
+            semantic_ms += t_frame.elapsed().as_millis();
+
+            let semantic_idx_val = combined_slice[0] as usize;
+
+            if semantic_idx_val == 1 {
+                tracing::info!(frame = frame_idx, "END_AUDIO token detected, stopping");
+                break;
+            }
+
+            // Extract acoustic from combined readback (no additional sync)
+            let acoustic_slice = &combined_slice[1..37];
+            euler_ms += 0; // No separate readback needed
 
             let mut acoustic_levels = [0usize; 36];
             for (i, &v) in acoustic_slice.iter().enumerate().take(36) {
@@ -335,7 +331,7 @@ impl Q4TtsBackbone {
                 acoustic_levels,
             });
 
-            // Backbone forward (next hidden state)
+            // Dispatch backbone forward for next frame (no sync)
             let t5 = Instant::now();
             let frame_embed = codebook.embed_frame(raw_semantic, &acoustic_levels);
             let next_input = frame_embed.unsqueeze_dim::<3>(0);
@@ -344,20 +340,28 @@ impl Q4TtsBackbone {
         }
 
         let n = frames.len();
-        tracing::info!(
-            frames = n,
-            prefill_ms = prefill_ms,
-            semantic_ms = semantic_ms,
-            euler_ms = euler_ms,
-            readback_ms = readback_ms,
-            backbone_ms = backbone_ms,
-            per_frame_ms = if n > 0 {
-                (semantic_ms + euler_ms + readback_ms + backbone_ms) / n as u128
-            } else {
-                0
-            },
-            "Q4 TTS generate_async timing breakdown"
-        );
+        if n > 0 {
+            let decode_total = semantic_ms + euler_ms + readback_ms + backbone_ms;
+            let per_frame = decode_total / n as u128;
+            tracing::info!(
+                frames = n,
+                prefill_ms = prefill_ms,
+                decode_total_ms = decode_total,
+                semantic_ms = semantic_ms,
+                euler_ms = euler_ms,
+                readback_ms = readback_ms,
+                backbone_ms = backbone_ms,
+                per_frame_ms = per_frame,
+                "Q4 TTS timing breakdown"
+            );
+            // Also print directly for test visibility
+            eprintln!(
+                "  [timing] prefill={prefill_ms}ms  decode={decode_total}ms ({n} frames, {per_frame}ms/frame)"
+            );
+            eprintln!(
+                "  [timing] semantic={semantic_ms}ms  euler={euler_ms}ms  readback={readback_ms}ms  backbone={backbone_ms}ms"
+            );
+        }
 
         Ok(frames)
     }
