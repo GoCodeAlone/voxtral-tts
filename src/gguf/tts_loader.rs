@@ -66,7 +66,7 @@ impl Q4TtsModelParts {
             cpu_bytes: self.tok_embed_q4_bytes,
         };
 
-        let backbone = Q4TtsBackbone::new(
+        let mut backbone = Q4TtsBackbone::new(
             self.backbone_layers,
             self.backbone_norm,
             tok_embeddings,
@@ -75,6 +75,9 @@ impl Q4TtsModelParts {
             self.config,
             self.device,
         );
+
+        // Fuse projections for faster decode (one-time cost)
+        backbone.fuse_projections();
 
         Ok((backbone, self.fm, self.codec))
     }

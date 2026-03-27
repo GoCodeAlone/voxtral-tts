@@ -34,6 +34,8 @@ pub struct Q4Attention {
     wk: Q4Linear,
     wv: Q4Linear,
     wo: Q4Linear,
+    /// Fused QKV projection (single matmul instead of 3). Created lazily.
+    fused_qkv: Option<super::linear::Q4FusedQKV>,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
@@ -59,6 +61,7 @@ impl Q4Attention {
             wk,
             wv,
             wo,
+            fused_qkv: None,
             n_heads,
             n_kv_heads,
             head_dim,
@@ -83,9 +86,15 @@ impl Q4Attention {
     ) -> Tensor<Wgpu, 3> {
         let [batch, seq_len, _] = x.dims();
 
-        let q = self.wq.forward(x.clone());
-        let k = self.wk.forward(x.clone());
-        let v = self.wv.forward(x);
+        // QKV projection — fused (1 kernel) or separate (3 kernels)
+        let (q, k, v) = if let Some(fused) = &self.fused_qkv {
+            fused.forward(x)
+        } else {
+            let q = self.wq.forward(x.clone());
+            let k = self.wk.forward(x.clone());
+            let v = self.wv.forward(x);
+            (q, k, v)
+        };
 
         let q = q.reshape([batch, seq_len, self.n_heads, self.head_dim]);
         let k = k.reshape([batch, seq_len, self.n_kv_heads, self.head_dim]);
@@ -132,9 +141,15 @@ impl Q4Attention {
         let [batch, seq_len, _] = x.dims();
         let offset = cache.seq_len();
 
-        let q = self.wq.forward(x.clone());
-        let k = self.wk.forward(x.clone());
-        let v = self.wv.forward(x);
+        // QKV projection — fused (1 kernel) or separate (3 kernels)
+        let (q, k, v) = if let Some(fused) = &self.fused_qkv {
+            fused.forward(x)
+        } else {
+            let q = self.wq.forward(x.clone());
+            let k = self.wk.forward(x.clone());
+            let v = self.wv.forward(x);
+            (q, k, v)
+        };
 
         let q = q.reshape([batch, seq_len, self.n_heads, self.head_dim]);
         let k = k.reshape([batch, seq_len, self.n_kv_heads, self.head_dim]);
@@ -171,6 +186,42 @@ impl Q4Attention {
         let out = out.swap_dims(1, 2);
         let out = out.reshape([batch, seq_len, self.n_heads * self.head_dim]);
         self.wo.forward(out)
+    }
+
+    /// Fuse Q/K/V weight matrices into a single concatenated Q4 tensor.
+    ///
+    /// After calling this, `forward` and `forward_with_cache` use a single
+    /// Q4 matmul for the QKV projection instead of 3 separate launches.
+    /// Call once after loading weights (one-time GPU read + upload cost).
+    pub fn fuse_qkv(&mut self, device: &burn::backend::wgpu::WgpuDevice) {
+        if self.fused_qkv.is_some() {
+            return; // Already fused
+        }
+        // Read Q4 bytes from each weight, concatenate, re-upload
+        let wq_bytes = self.wq.weights().read_bytes();
+        let wk_bytes = self.wk.weights().read_bytes();
+        let wv_bytes = self.wv.weights().read_bytes();
+
+        let [q_out, k] = self.wq.weights().shape();
+        let [k_out, _] = self.wk.weights().shape();
+        let [v_out, _] = self.wv.weights().shape();
+
+        let mut fused_bytes = Vec::with_capacity(wq_bytes.len() + wk_bytes.len() + wv_bytes.len());
+        fused_bytes.extend_from_slice(&wq_bytes);
+        fused_bytes.extend_from_slice(&wk_bytes);
+        fused_bytes.extend_from_slice(&wv_bytes);
+
+        if let Ok(fused) =
+            super::tensor::Q4Tensor::from_q4_bytes(&fused_bytes, [q_out + k_out + v_out, k], device)
+        {
+            self.fused_qkv = Some(super::linear::Q4FusedQKV::new(fused, q_out, k_out, v_out));
+            tracing::debug!(
+                q_out,
+                k_out,
+                v_out,
+                "Fused QKV weights into single Q4 tensor"
+            );
+        }
     }
 
     /// Expand K, V heads for GQA using broadcast-friendly expand.
@@ -212,23 +263,58 @@ impl Q4Attention {
 /// SwiGLU MLP with Q4-quantized weights.
 ///
 /// Computes `w2(silu(w1(x)) * w3(x))`.
+/// Optionally fuses w1+w3 into a single Q4 matmul (gate+up projection).
 pub struct Q4FeedForward {
     w1: Q4Linear,
     w2: Q4Linear,
     w3: Q4Linear,
+    /// Fused gate+up projection (w1||w3). Single matmul instead of 2.
+    fused_gate_up: Option<super::linear::Q4FusedGateUp>,
 }
 
 impl Q4FeedForward {
     /// Create a new Q4 feed-forward layer.
     pub fn new(w1: Q4Linear, w2: Q4Linear, w3: Q4Linear) -> Self {
-        Self { w1, w2, w3 }
+        Self {
+            w1,
+            w2,
+            w3,
+            fused_gate_up: None,
+        }
     }
 
     /// Forward pass.
     pub fn forward(&self, x: Tensor<Wgpu, 3>) -> Tensor<Wgpu, 3> {
-        let gate = silu(self.w1.forward(x.clone()));
-        let up = self.w3.forward(x);
-        self.w2.forward(gate * up)
+        if let Some(fused) = &self.fused_gate_up {
+            let (gate, up) = fused.forward(x);
+            self.w2.forward(silu(gate) * up)
+        } else {
+            let gate = silu(self.w1.forward(x.clone()));
+            let up = self.w3.forward(x);
+            self.w2.forward(gate * up)
+        }
+    }
+
+    /// Fuse w1+w3 into single Q4 matmul for the gate+up projection.
+    pub fn fuse_gate_up(&mut self, device: &burn::backend::wgpu::WgpuDevice) {
+        if self.fused_gate_up.is_some() {
+            return;
+        }
+        let w1_bytes = self.w1.weights().read_bytes();
+        let w3_bytes = self.w3.weights().read_bytes();
+
+        let [w1_out, k] = self.w1.weights().shape();
+        let [w3_out, _] = self.w3.weights().shape();
+
+        let mut fused_bytes = Vec::with_capacity(w1_bytes.len() + w3_bytes.len());
+        fused_bytes.extend_from_slice(&w1_bytes);
+        fused_bytes.extend_from_slice(&w3_bytes);
+
+        if let Ok(fused) =
+            super::tensor::Q4Tensor::from_q4_bytes(&fused_bytes, [w1_out + w3_out, k], device)
+        {
+            self.fused_gate_up = Some(super::linear::Q4FusedGateUp::new(fused, w1_out, w3_out));
+        }
     }
 }
 

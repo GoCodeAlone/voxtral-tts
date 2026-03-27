@@ -27,9 +27,9 @@ use super::model::TokEmbedStore;
 /// Uses CAUSAL attention.
 pub struct Q4TtsDecoderLayer {
     attention_norm: RmsNorm<Wgpu>,
-    attention: super::model::Q4Attention,
+    pub(crate) attention: super::model::Q4Attention,
     ffn_norm: RmsNorm<Wgpu>,
-    ffn: super::model::Q4FeedForward,
+    pub(crate) ffn: super::model::Q4FeedForward,
 }
 
 impl Q4TtsDecoderLayer {
@@ -222,6 +222,24 @@ impl Q4TtsBackbone {
             self.config.head_dim,
             &self.device,
         )
+    }
+
+    /// Fuse projections in all backbone layers for faster decode.
+    ///
+    /// - QKV: wq+wk+wv → single Q4 matmul (3→1 launches per layer)
+    /// - Gate+Up: w1+w3 → single Q4 matmul (2→1 launches per layer)
+    ///
+    /// Total: 26 layers × 3 fewer launches = 78 fewer kernel launches per frame.
+    /// One-time cost at model load.
+    pub fn fuse_projections(&mut self) {
+        for layer in &mut self.layers {
+            layer.attention.fuse_qkv(&self.device);
+            layer.ffn.fuse_gate_up(&self.device);
+        }
+        tracing::info!(
+            layers = self.layers.len(),
+            "Fused QKV + gate/up projections in backbone"
+        );
     }
 
     /// Number of layers.
