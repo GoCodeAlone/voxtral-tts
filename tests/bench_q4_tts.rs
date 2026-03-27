@@ -16,7 +16,7 @@ fn models_available() -> bool {
 
 #[test]
 fn bench_q4_tts_mary() {
-    run_bench("Mary had a little lamb", 300, "mary", None);
+    run_bench("Mary had a little lamb", 300, "mary", Some(3));
 }
 
 #[test]

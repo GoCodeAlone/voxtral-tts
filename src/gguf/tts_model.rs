@@ -209,9 +209,19 @@ impl Q4TtsBackbone {
         self.norm.forward(x)
     }
 
-    /// Create a new set of KV caches for autoregressive decoding.
-    pub fn create_cache(&self) -> LayerCaches<Wgpu> {
-        LayerCaches::new(self.layers.len())
+    /// Create pre-allocated KV caches for autoregressive decoding.
+    ///
+    /// Pre-allocates GPU buffers for max_seq tokens, avoiding per-token
+    /// GPU allocations during the decode loop.
+    pub fn create_cache(&self, max_seq: usize) -> LayerCaches<Wgpu> {
+        LayerCaches::new_preallocated(
+            self.layers.len(),
+            1, // batch_size
+            self.config.n_kv_heads,
+            max_seq,
+            self.config.head_dim,
+            &self.device,
+        )
     }
 
     /// Number of layers.
@@ -264,7 +274,8 @@ impl Q4TtsBackbone {
         use std::time::Instant;
 
         let acoustic_dim = fm.config().acoustic_dim;
-        let mut caches = self.create_cache();
+        let [_, input_seq_len, _] = input_sequence.dims();
+        let mut caches = self.create_cache(input_seq_len + max_frames);
         let mut frames = Vec::with_capacity(max_frames);
 
         // Stage timing accumulators

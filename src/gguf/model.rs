@@ -173,7 +173,11 @@ impl Q4Attention {
         self.wo.forward(out)
     }
 
-    /// Expand K, V heads for GQA.
+    /// Expand K, V heads for GQA using broadcast-friendly expand.
+    ///
+    /// Instead of materializing a 4x larger tensor via `repeat_dim`, uses
+    /// `expand()` which creates a view without copying data. The subsequent
+    /// matmul handles the broadcast natively.
     fn expand_kv(
         &self,
         k: Tensor<Wgpu, 4>,
@@ -185,13 +189,17 @@ impl Q4Attention {
         let repeat_factor = self.n_heads / self.n_kv_heads;
         let [batch, n_kv_heads, seq, head_dim] = k.dims();
 
+        // Reshape to [batch, n_kv_heads, 1, seq, head_dim], expand to
+        // [batch, n_kv_heads, repeat_factor, seq, head_dim], then merge
+        // head groups: [batch, n_heads, seq, head_dim].
+        // expand() is a zero-copy broadcast; reshape merges dimensions.
         let k = k
-            .unsqueeze_dim::<5>(2)
-            .repeat_dim(2, repeat_factor)
+            .reshape([batch, n_kv_heads, 1, seq, head_dim])
+            .expand([batch, n_kv_heads, repeat_factor, seq, head_dim])
             .reshape([batch, n_kv_heads * repeat_factor, seq, head_dim]);
         let v = v
-            .unsqueeze_dim::<5>(2)
-            .repeat_dim(2, repeat_factor)
+            .reshape([batch, n_kv_heads, 1, seq, head_dim])
+            .expand([batch, n_kv_heads, repeat_factor, seq, head_dim])
             .reshape([batch, n_kv_heads * repeat_factor, seq, head_dim]);
         (k, v)
     }
