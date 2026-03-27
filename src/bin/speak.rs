@@ -44,6 +44,11 @@ struct Cli {
     #[arg(long, default_value_t = 2000)]
     max_frames: usize,
 
+    /// Number of Euler ODE steps for flow matching (default: 8). Lower = faster but may reduce quality.
+    /// 4 steps is a good speed/quality tradeoff. 3 steps approaches real-time on GPU.
+    #[arg(long)]
+    euler_steps: Option<usize>,
+
     /// Pre-tokenized token IDs (comma-separated). Bypasses Tekken text tokenization.
     #[arg(long, value_delimiter = ',')]
     token_ids: Option<Vec<u32>>,
@@ -71,8 +76,14 @@ fn main() -> Result<()> {
     // Load pipeline
     let start = Instant::now();
     info!("Loading TTS pipeline from {}", model_dir.display());
-    let pipeline = TtsPipeline::<Backend>::from_model_dir(&model_dir, &device)
+    let mut pipeline = TtsPipeline::<Backend>::from_model_dir(&model_dir, &device)
         .context("Failed to load TTS pipeline")?;
+
+    if let Some(steps) = cli.euler_steps {
+        info!(euler_steps = steps, "Overriding Euler ODE steps");
+        pipeline.set_euler_steps(steps);
+    }
+
     info!(
         elapsed_ms = start.elapsed().as_millis() as u64,
         "TTS pipeline loaded"

@@ -228,6 +228,11 @@ impl<B: Backend> TtsPipeline<B> {
     pub fn codec(&self) -> &CodecDecoder<B> {
         &self.codec
     }
+
+    /// Override the number of Euler ODE steps for flow matching.
+    pub fn set_euler_steps(&mut self, steps: usize) {
+        self.fm.set_euler_steps(steps);
+    }
 }
 
 #[cfg(test)]

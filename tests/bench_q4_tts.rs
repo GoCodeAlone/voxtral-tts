@@ -8,9 +8,15 @@ use std::time::Instant;
 
 type Backend = Wgpu;
 
+fn models_available() -> bool {
+    Path::new("models/voxtral-tts-q4.gguf").exists()
+        && Path::new("models/voxtral-tts/voice_embedding/casual_female.safetensors").exists()
+        && Path::new("models/voxtral-tts/tekken.json").exists()
+}
+
 #[test]
 fn bench_q4_tts_mary() {
-    run_bench("Mary had a little lamb", 300, "mary");
+    run_bench("Mary had a little lamb", 300, "mary", None);
 }
 
 #[test]
@@ -19,14 +25,31 @@ fn bench_q4_tts_fox() {
         "The quick brown fox jumps over the lazy dog",
         300,
         "fox",
+        None,
     );
 }
 
-fn run_bench(text: &str, max_frames: usize, tag: &str) {
-    if !Path::new("models/voxtral-tts-q4.gguf").exists()
-        || !Path::new("models/voxtral-tts/voice_embedding/casual_female.safetensors").exists()
-        || !Path::new("models/voxtral-tts/tekken.json").exists()
-    {
+/// Test reduced Euler steps for speed/quality tradeoff
+#[test]
+fn bench_q4_tts_euler_steps() {
+    if !models_available() {
+        println!("Skipping: model files not found");
+        return;
+    }
+
+    // Run with different step counts to find the quality/speed sweet spot
+    for steps in [8, 6, 4, 3] {
+        run_bench(
+            "Mary had a little lamb",
+            300,
+            &format!("mary_euler{steps}"),
+            Some(steps),
+        );
+    }
+}
+
+fn run_bench(text: &str, max_frames: usize, tag: &str, euler_steps_override: Option<usize>) {
+    if !models_available() {
         println!("Skipping {tag}: model files not found");
         return;
     }
@@ -39,8 +62,13 @@ fn run_bench(text: &str, max_frames: usize, tag: &str) {
         "models/voxtral-tts-q4.gguf",
     ))
     .unwrap();
-    let (backbone, fm, codec) = loader.load(&device).unwrap();
+    let (backbone, mut fm, codec) = loader.load(&device).unwrap();
     let load_ms = t0.elapsed().as_millis();
+
+    // Override Euler steps if requested
+    if let Some(steps) = euler_steps_override {
+        fm.set_euler_steps(steps);
+    }
 
     // Load voice
     let voice_bytes =
@@ -58,8 +86,7 @@ fn run_bench(text: &str, max_frames: usize, tag: &str) {
     // Build input sequence
     let special = voxtral_mini_realtime::tts::config::TtsSpecialTokens::default();
     let bos = backbone.embed_tokens_from_ids(&[special.bos_token_id as i32], 1, 1);
-    let begin_audio =
-        backbone.embed_tokens_from_ids(&[special.begin_audio_token_id as i32], 1, 1);
+    let begin_audio = backbone.embed_tokens_from_ids(&[special.begin_audio_token_id as i32], 1, 1);
     let next_audio_text =
         backbone.embed_tokens_from_ids(&[special.next_audio_text_token_id as i32], 1, 1);
     let repeat_audio_text =
@@ -132,8 +159,9 @@ fn run_bench(text: &str, max_frames: usize, tag: &str) {
     let wav_path = format!("/tmp/bench_q4_{tag}.wav");
     audio_buf.save(Path::new(&wav_path)).unwrap();
 
+    let steps = euler_steps_override.unwrap_or(8);
     println!();
-    println!("=== Q4 TTS Benchmark: \"{text}\" ===");
+    println!("=== Q4 TTS Benchmark: \"{text}\" (euler_steps={steps}) ===");
     println!("  Model load:    {load_ms:>6} ms");
     println!("  Input seq:     {seq_len:>6} tokens");
     println!("  Generation:    {gen_ms:>6} ms  ({n_frames} frames)");

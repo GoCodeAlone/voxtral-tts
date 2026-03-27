@@ -580,6 +580,11 @@ impl Q4FmTransformer {
     pub fn config(&self) -> &FmTransformerConfig {
         &self.config
     }
+
+    /// Override the number of Euler ODE steps (for speed/quality tradeoff tuning).
+    pub fn set_euler_steps(&mut self, steps: usize) {
+        self.config.euler_steps = steps;
+    }
 }
 
 #[cfg(test)]

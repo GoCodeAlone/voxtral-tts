@@ -218,10 +218,14 @@ impl<B: Backend> FmTransformer<B> {
         let device = h.device();
 
         // Project inputs to FM dim
-        let x_proj = self.input_projection.forward(x_t); // [1, 1, 3072]
+        let x_proj = self.input_projection.forward(x_t); // [B, 1, 3072]
         let t_embed = self.time_embedding.embed(t, &device); // [1, 1, 3072]
         let t_proj = self.time_projection.forward(t_embed); // [1, 1, 3072]
-        let h_proj = self.llm_projection.forward(h); // [1, 1, 3072]
+        let h_proj = self.llm_projection.forward(h); // [B, 1, 3072]
+
+        // Expand t_proj to match batch dimension (for batched CFG)
+        let [batch, _, _] = x_proj.dims();
+        let t_proj = t_proj.expand([batch, 1, self.config.dim]);
 
         // Build 3-token sequence: [x_t, t, h] per vLLM reference
         // Position 0: acoustic state, Position 1: time, Position 2: backbone hidden
@@ -295,34 +299,36 @@ impl<B: Backend> FmTransformer<B> {
     /// Final acoustic state [1, acoustic_dim] ready for FSQ quantization.
     pub fn euler_ode_solve(&self, h: Tensor<B, 3>, noise: Tensor<B, 2>) -> Tensor<B, 2> {
         let device = h.device();
-        let n_points = self.config.euler_steps; // 8 points → 7 intervals
+        let n_points = self.config.euler_steps;
         let alpha = self.config.cfg_alpha;
 
-        // Zero hidden state for unconditional pass
+        // Pre-build batched hidden state: [2, 1, dim] = [h_cond, h_uncond=zeros]
         let [batch, seq, dim] = h.dims();
         let h_uncond: Tensor<B, 3> = Tensor::zeros([batch, seq, dim], &device);
+        let h_batched = Tensor::cat(vec![h, h_uncond], 0); // [2, 1, dim]
 
-        let mut x_t = noise; // [1, acoustic_dim]
+        let mut x_t = noise;
 
-        // linspace(0, 1, n_points): iterate over N-1 intervals
         for step in 0..(n_points - 1) {
             let t = step as f32 / (n_points - 1) as f32;
             let dt = 1.0 / (n_points - 1) as f32;
 
-            // Reshape x_t to [1, 1, acoustic_dim] for predict_velocity
             let [b, acoustic_dim] = x_t.dims();
             let x_t_3d = x_t.clone().reshape([b, 1, acoustic_dim]);
 
-            // Conditional velocity: FM(x_t, t, h)
-            let v_cond = self.predict_velocity(h.clone(), x_t_3d.clone(), t);
+            // Batch: duplicate x_t for both cond and uncond passes
+            let x_t_batched = Tensor::cat(vec![x_t_3d.clone(), x_t_3d], 0); // [2, 1, acoustic_dim]
 
-            // Unconditional velocity: FM(x_t, t, zeros)
-            let v_uncond = self.predict_velocity(h_uncond.clone(), x_t_3d, t);
+            // Single batched forward: [2, 1, acoustic_dim] → [2, acoustic_dim]
+            let v_batched = self.predict_velocity(h_batched.clone(), x_t_batched, t);
+
+            // Split: v_cond = v_batched[0], v_uncond = v_batched[1]
+            let v_cond = v_batched.clone().slice([0..1, 0..acoustic_dim]);
+            let v_uncond = v_batched.slice([1..2, 0..acoustic_dim]);
 
             // CFG: v = alpha * v_cond + (1 - alpha) * v_uncond
             let v = v_cond * alpha + v_uncond * (1.0 - alpha);
 
-            // Euler step: x_{t+dt} = x_t + v * dt (forward in time)
             x_t = x_t + v * dt;
         }
 
@@ -337,6 +343,11 @@ impl<B: Backend> FmTransformer<B> {
     /// Access the config.
     pub fn config(&self) -> &FmTransformerConfig {
         &self.config
+    }
+
+    /// Override the number of Euler ODE steps (for speed/quality tradeoff tuning).
+    pub fn set_euler_steps(&mut self, steps: usize) {
+        self.config.euler_steps = steps;
     }
 }
 
