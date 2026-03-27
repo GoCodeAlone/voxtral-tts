@@ -383,25 +383,12 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
     }
 
     // -----------------------------------------------------------------------
-    // Primitive loading helpers
+    // Primitive loading helpers (delegate to free functions)
     // -----------------------------------------------------------------------
 
     /// Load a Q4_0 tensor as a [`Q4Linear`] (no bias).
     fn load_q4_linear(&mut self, name: &str, device: &WgpuDevice) -> Result<Q4Linear> {
-        let info = self
-            .reader
-            .tensor_info(name)
-            .with_context(|| format!("Tensor '{name}' not found"))?
-            .clone();
-
-        if info.dtype() != GgmlDtype::Q4_0 {
-            bail!("Expected Q4_0 for '{name}', got {:?}", info.dtype());
-        }
-
-        let shape = reverse_gguf_dims(info.shape());
-        let bytes = self.reader.tensor_data(name)?;
-        let q4 = Q4Tensor::from_q4_bytes(&bytes, [shape[0], shape[1]], device)?;
-        Ok(Q4Linear::new(q4, None))
+        gguf_load_q4_linear(&mut self.reader, name, device)
     }
 
     /// Load a Q4_0 tensor with an optional F32 bias as a [`Q4Linear`].
@@ -411,32 +398,7 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
         bias_name: Option<&str>,
         device: &WgpuDevice,
     ) -> Result<Q4Linear> {
-        let info = self
-            .reader
-            .tensor_info(weight_name)
-            .with_context(|| format!("Tensor '{weight_name}' not found"))?
-            .clone();
-
-        if info.dtype() != GgmlDtype::Q4_0 {
-            bail!("Expected Q4_0 for '{weight_name}', got {:?}", info.dtype());
-        }
-
-        let shape = reverse_gguf_dims(info.shape());
-        let bytes = self.reader.tensor_data(weight_name)?;
-        let q4 = Q4Tensor::from_q4_bytes(&bytes, [shape[0], shape[1]], device)?;
-
-        let bias = if let Some(bias_name) = bias_name {
-            if self.reader.tensor_info(bias_name).is_some() {
-                let bias_tensor: Tensor<Wgpu, 1> = self.load_f32_tensor(bias_name, device)?;
-                Some(bias_tensor)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        Ok(Q4Linear::new(q4, bias))
+        gguf_load_q4_linear_with_optional_bias(&mut self.reader, weight_name, bias_name, device)
     }
 
     /// Load an F32/F16 tensor from GGUF.
@@ -445,32 +407,7 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
         name: &str,
         device: &WgpuDevice,
     ) -> Result<Tensor<Wgpu, D>> {
-        let info = self
-            .reader
-            .tensor_info(name)
-            .with_context(|| format!("Tensor '{name}' not found"))?
-            .clone();
-
-        let shape: Vec<usize> = reverse_gguf_dims(info.shape());
-        let bytes = self.reader.tensor_data(name)?;
-
-        let data: Vec<f32> = match info.dtype() {
-            GgmlDtype::F32 => bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect(),
-            GgmlDtype::F16 => bytes
-                .chunks_exact(2)
-                .map(|b| {
-                    let bits = u16::from_le_bytes([b[0], b[1]]);
-                    half::f16::from_bits(bits).to_f32()
-                })
-                .collect(),
-            GgmlDtype::Q4_0 => bail!("Cannot load Q4_0 tensor '{name}' as f32; use load_q4_linear"),
-        };
-
-        let tensor_data = TensorData::new(data, shape);
-        Ok(Tensor::from_data(tensor_data, device))
+        gguf_load_f32_tensor(&mut self.reader, name, device)
     }
 
     /// Load an RmsNorm layer from GGUF.
@@ -480,21 +417,123 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
         eps: f64,
         device: &WgpuDevice,
     ) -> Result<RmsNorm<Wgpu>> {
-        let weight: Tensor<Wgpu, 1> = self.load_f32_tensor(name, device)?;
-        Ok(RmsNorm {
-            weight: burn::nn::RmsNorm {
-                gamma: Param::initialized(ParamId::new(), weight),
-                epsilon: eps,
-            },
-        })
+        gguf_load_rms_norm(&mut self.reader, name, eps, device)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared GGUF loading helpers (used by both ASR and TTS loaders)
+// ---------------------------------------------------------------------------
+
+/// Load a Q4_0 tensor as a [`Q4Linear`] (no bias).
+pub(crate) fn gguf_load_q4_linear<R: Read + Seek>(
+    reader: &mut GgufReader<R>,
+    name: &str,
+    device: &WgpuDevice,
+) -> Result<Q4Linear> {
+    let info = reader
+        .tensor_info(name)
+        .with_context(|| format!("Tensor '{name}' not found"))?
+        .clone();
+
+    if info.dtype() != GgmlDtype::Q4_0 {
+        bail!("Expected Q4_0 for '{name}', got {:?}", info.dtype());
+    }
+
+    let shape = reverse_gguf_dims(info.shape());
+    let bytes = reader.tensor_data(name)?;
+    let q4 = Q4Tensor::from_q4_bytes(&bytes, [shape[0], shape[1]], device)?;
+    Ok(Q4Linear::new(q4, None))
+}
+
+/// Load a Q4_0 tensor with an optional F32 bias as a [`Q4Linear`].
+pub(crate) fn gguf_load_q4_linear_with_optional_bias<R: Read + Seek>(
+    reader: &mut GgufReader<R>,
+    weight_name: &str,
+    bias_name: Option<&str>,
+    device: &WgpuDevice,
+) -> Result<Q4Linear> {
+    let info = reader
+        .tensor_info(weight_name)
+        .with_context(|| format!("Tensor '{weight_name}' not found"))?
+        .clone();
+
+    if info.dtype() != GgmlDtype::Q4_0 {
+        bail!("Expected Q4_0 for '{weight_name}', got {:?}", info.dtype());
+    }
+
+    let shape = reverse_gguf_dims(info.shape());
+    let bytes = reader.tensor_data(weight_name)?;
+    let q4 = Q4Tensor::from_q4_bytes(&bytes, [shape[0], shape[1]], device)?;
+
+    let bias = if let Some(bias_name) = bias_name {
+        if reader.tensor_info(bias_name).is_some() {
+            let bias_tensor: Tensor<Wgpu, 1> = gguf_load_f32_tensor(reader, bias_name, device)?;
+            Some(bias_tensor)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(Q4Linear::new(q4, bias))
+}
+
+/// Load an F32/F16 tensor from GGUF.
+pub(crate) fn gguf_load_f32_tensor<R: Read + Seek, const D: usize>(
+    reader: &mut GgufReader<R>,
+    name: &str,
+    device: &WgpuDevice,
+) -> Result<Tensor<Wgpu, D>> {
+    let info = reader
+        .tensor_info(name)
+        .with_context(|| format!("Tensor '{name}' not found"))?
+        .clone();
+
+    let shape: Vec<usize> = reverse_gguf_dims(info.shape());
+    let bytes = reader.tensor_data(name)?;
+
+    let data: Vec<f32> = match info.dtype() {
+        GgmlDtype::F32 => bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect(),
+        GgmlDtype::F16 => bytes
+            .chunks_exact(2)
+            .map(|b| {
+                let bits = u16::from_le_bytes([b[0], b[1]]);
+                half::f16::from_bits(bits).to_f32()
+            })
+            .collect(),
+        GgmlDtype::Q4_0 => bail!("Cannot load Q4_0 tensor '{name}' as f32; use load_q4_linear"),
+    };
+
+    let tensor_data = TensorData::new(data, shape);
+    Ok(Tensor::from_data(tensor_data, device))
+}
+
+/// Load an RmsNorm layer from GGUF.
+pub(crate) fn gguf_load_rms_norm<R: Read + Seek>(
+    reader: &mut GgufReader<R>,
+    name: &str,
+    eps: f64,
+    device: &WgpuDevice,
+) -> Result<RmsNorm<Wgpu>> {
+    let weight: Tensor<Wgpu, 1> = gguf_load_f32_tensor(reader, name, device)?;
+    Ok(RmsNorm {
+        weight: burn::nn::RmsNorm {
+            gamma: Param::initialized(ParamId::new(), weight),
+            epsilon: eps,
+        },
+    })
 }
 
 /// Reverse GGUF dimension order to get PyTorch convention.
 ///
 /// GGUF stores dimensions in reversed order (row-major innermost first),
 /// while PyTorch uses `[out_features, in_features]` convention.
-fn reverse_gguf_dims(gguf_dims: &[u64]) -> Vec<usize> {
+pub(crate) fn reverse_gguf_dims(gguf_dims: &[u64]) -> Vec<usize> {
     gguf_dims.iter().rev().map(|&d| d as usize).collect()
 }
 
@@ -502,7 +541,7 @@ fn reverse_gguf_dims(gguf_dims: &[u64]) -> Vec<usize> {
 ///
 /// Same logic as [`Q4Tensor::dequantize`] but operates on raw bytes without
 /// a GPU round-trip, making it safe on WASM.
-fn dequantize_q4_0_cpu(raw: &[u8], num_elements: usize) -> Vec<f32> {
+pub(crate) fn dequantize_q4_0_cpu(raw: &[u8], num_elements: usize) -> Vec<f32> {
     let num_blocks = num_elements / 32;
     let mut output = vec![0.0f32; num_elements];
     for block_idx in 0..num_blocks {

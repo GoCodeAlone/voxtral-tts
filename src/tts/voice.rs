@@ -107,6 +107,24 @@ impl VoiceRegistry {
     }
 }
 
+/// Load a voice embedding from in-memory SafeTensors bytes.
+///
+/// Used in WASM where voice files are fetched via HTTP rather than
+/// loaded from the filesystem.
+pub fn load_voice_from_bytes<B: Backend>(
+    bytes: &[u8],
+    expected_dim: usize,
+    device: &B::Device,
+) -> Result<Tensor<B, 2>> {
+    let st = safetensors::SafeTensors::deserialize(bytes)
+        .context("Failed to deserialize voice SafeTensors bytes")?;
+
+    let embedding: Tensor<B, 2> = load_tensor(&st, "embedding", device)
+        .context("Voice bytes must contain a tensor named 'embedding'")?;
+
+    validate_voice_embedding(&embedding, expected_dim, "bytes")
+}
+
 /// Load a single voice embedding from a SafeTensors file.
 ///
 /// Expects a tensor named `"embedding"` with shape `[N, embed_dim]`.
@@ -126,21 +144,23 @@ pub fn load_voice_embedding<B: Backend>(
             )
         })?;
 
+    validate_voice_embedding(&embedding, expected_dim, &path.display().to_string())
+}
+
+/// Validate a voice embedding tensor's shape.
+fn validate_voice_embedding<B: Backend>(
+    embedding: &Tensor<B, 2>,
+    expected_dim: usize,
+    source: &str,
+) -> Result<Tensor<B, 2>> {
     let [n_frames, dim] = embedding.dims();
     if dim != expected_dim {
-        bail!(
-            "Voice embedding dimension mismatch in {}: expected {}, got {}",
-            path.display(),
-            expected_dim,
-            dim
-        );
+        bail!("Voice embedding dimension mismatch in {source}: expected {expected_dim}, got {dim}",);
     }
-
     if n_frames == 0 {
-        bail!("Voice embedding in {} has zero frames", path.display());
+        bail!("Voice embedding in {source} has zero frames");
     }
-
-    Ok(embedding)
+    Ok(embedding.clone())
 }
 
 #[cfg(test)]

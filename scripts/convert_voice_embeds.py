@@ -20,14 +20,14 @@ import torch
 from safetensors.torch import save_file
 
 
-def convert_pt_to_safetensors(pt_path: Path) -> Path:
+def convert_pt_to_safetensors(pt_path: Path) -> tuple[Path, list[int]]:
     """Convert a single .pt voice embedding to SafeTensors.
 
     Args:
         pt_path: Path to the .pt file.
 
     Returns:
-        Path to the written .safetensors file.
+        Tuple of (output path, tensor shape).
     """
     data = torch.load(pt_path, map_location="cpu", weights_only=True)
 
@@ -62,9 +62,10 @@ def convert_pt_to_safetensors(pt_path: Path) -> Path:
     if tensor.dtype != torch.bfloat16:
         tensor = tensor.to(torch.bfloat16)
 
+    shape = list(tensor.shape)
     out_path = pt_path.with_suffix(".safetensors")
     save_file({"embedding": tensor}, str(out_path))
-    return out_path
+    return out_path, shape
 
 
 def main() -> None:
@@ -103,17 +104,8 @@ def main() -> None:
             continue
 
         try:
-            convert_pt_to_safetensors(pt_path)
-            # Load back to verify and show shape
-            data = torch.load(pt_path, map_location="cpu", weights_only=True)
-            if isinstance(data, torch.Tensor):
-                shape = list(data.shape)
-            elif isinstance(data, dict):
-                tensor = next(iter(data.values())) if len(data) == 1 else data["embedding"]
-                shape = list(tensor.shape)
-            else:
-                shape = "?"
-            print(f"  done {pt_path.name} -> {out_path.name} {shape}")
+            result_path, shape = convert_pt_to_safetensors(pt_path)
+            print(f"  done {pt_path.name} -> {result_path.name} {shape}")
             converted += 1
         except Exception as e:
             print(f"  FAIL {pt_path.name}: {e}", file=sys.stderr)

@@ -25,6 +25,7 @@ const MIME = {
   ".wav":  "audio/wav",
   ".css":  "text/css",
   ".bin":  "application/octet-stream",
+  ".safetensors": "application/octet-stream",
 };
 
 const TLS = {
@@ -32,10 +33,16 @@ const TLS = {
   cert: readFileSync("/tmp/voxtral-cert.pem"),
 };
 
-// Discover model shards
+// Discover ASR model shards
 const SHARD_DIR = join(ROOT, "models/voxtral-q4-shards");
 const shardNames = existsSync(SHARD_DIR)
   ? readdirSync(SHARD_DIR).filter(f => f.startsWith("shard-")).sort()
+  : [];
+
+// Discover TTS model shards
+const TTS_SHARD_DIR = join(ROOT, "models/voxtral-tts-q4-shards");
+const ttsShardNames = existsSync(TTS_SHARD_DIR)
+  ? readdirSync(TTS_SHARD_DIR).filter(f => f.startsWith("shard-")).sort()
   : [];
 
 const server = createServer(TLS, (req, res) => {
@@ -46,10 +53,17 @@ const server = createServer(TLS, (req, res) => {
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
 
-  // API: list available shards
+  // API: list available ASR shards
   if (pathname === "/api/shards") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ shards: shardNames }));
+    return;
+  }
+
+  // API: list available TTS shards
+  if (pathname === "/api/tts-shards") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ shards: ttsShardNames }));
     return;
   }
 
@@ -106,6 +120,7 @@ const server = createServer(TLS, (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`\nVoxtral dev server running:`);
   console.log(`  Local:   https://localhost:${PORT}`);
-  console.log(`\nModel shards: ${shardNames.length} (${SHARD_DIR})`);
+  console.log(`\nASR shards: ${shardNames.length} (${SHARD_DIR})`);
+  console.log(`TTS shards: ${ttsShardNames.length} (${TTS_SHARD_DIR})`);
   console.log(`\nNote: Accept the self-signed certificate in your browser.\n`);
 });

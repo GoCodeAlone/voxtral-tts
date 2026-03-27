@@ -59,6 +59,30 @@ impl<B: Backend> CausalConv1d<B> {
         Self { conv, pad_left }
     }
 
+    /// Create a causal Conv1d from a pre-fused weight tensor.
+    ///
+    /// Used for GGUF loading where weight norms are pre-fused by the conversion script.
+    ///
+    /// # Arguments
+    /// * `weight` - Fused weight tensor [C_out, C_in, K]
+    /// * `stride` - Convolution stride
+    /// * `device` - Device for tensor allocation
+    pub fn from_fused_weight(weight: Tensor<B, 3>, stride: usize, device: &B::Device) -> Self {
+        let [c_out, c_in, kernel_size] = weight.dims();
+
+        let mut conv = Conv1dConfig::new(c_in, c_out, kernel_size)
+            .with_stride(stride)
+            .with_padding(PaddingConfig1d::Explicit(0))
+            .with_bias(false)
+            .init(device);
+
+        conv.weight = Param::initialized(ParamId::new(), weight);
+
+        let pad_left = kernel_size - stride;
+
+        Self { conv, pad_left }
+    }
+
     /// Load a causal Conv1d from SafeTensors with weight norm fusion.
     ///
     /// Expects two tensors:
@@ -156,6 +180,31 @@ impl<B: Backend> CausalConvTranspose1d<B> {
         let weight = fuse_weight_norm(g, v);
 
         // Create ConvTranspose1d via config, then replace weight
+        let mut conv = ConvTranspose1dConfig::new([c_in, c_out], kernel_size)
+            .with_stride(stride)
+            .with_padding(0)
+            .with_padding_out(0)
+            .with_bias(false)
+            .init(device);
+
+        conv.weight = Param::initialized(ParamId::new(), weight);
+
+        let trim_right = kernel_size - stride;
+
+        Self { conv, trim_right }
+    }
+
+    /// Create a causal ConvTranspose1d from a pre-fused weight tensor.
+    ///
+    /// Used for GGUF loading where weight norms are pre-fused by the conversion script.
+    ///
+    /// # Arguments
+    /// * `weight` - Fused weight tensor [C_in, C_out, K]
+    /// * `stride` - Convolution stride (upsampling factor)
+    /// * `device` - Device for tensor allocation
+    pub fn from_fused_weight(weight: Tensor<B, 3>, stride: usize, device: &B::Device) -> Self {
+        let [c_in, c_out, kernel_size] = weight.dims();
+
         let mut conv = ConvTranspose1dConfig::new([c_in, c_out], kernel_size)
             .with_stride(stride)
             .with_padding(0)

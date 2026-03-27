@@ -53,7 +53,8 @@ cargo run --features "wgpu,cli,hub" --bin voxtral-transcribe -- \
 
 # CLI TTS inference
 cargo run --features "wgpu,cli,hub" --bin voxtral-speak -- \
-  --text "Hello world" --voice casual_female --output hello.wav
+  --text "Hello world" --voice casual_female --output hello.wav \
+  --max-frames 2000
 
 # Dev HTTPS server for browser testing
 bun serve.mjs

@@ -86,6 +86,7 @@ rustc-hash = "1.1"
 criterion = "0.8"
 approx = "0.5"
 tempfile = "3.24"
+pollster = "0.4.0"
 
 [[bin]]
 name = "voxtral-transcribe"

@@ -249,11 +249,11 @@ impl<B: Backend> TtsBackbone<B> {
         let [batch, seq_len, dim] = prefill_out.dims();
         let mut h = prefill_out.slice([0..batch, (seq_len - 1)..seq_len, 0..dim]); // [1, 1, dim]
 
-        if tracing::enabled!(tracing::Level::DEBUG) {
+        if tracing::enabled!(tracing::Level::TRACE) {
             let h_data = h.clone().reshape([dim]).to_data();
             let h_slice = h_data.as_slice::<f32>().unwrap();
             let h_norm: f32 = h_slice.iter().map(|x| x * x).sum::<f32>().sqrt();
-            tracing::debug!(h_norm = format!("{h_norm:.4}"), "Prefill hidden state");
+            tracing::trace!(h_norm = format!("{h_norm:.4}"), "Prefill hidden state");
         }
 
         // Phase 2: Decode loop — one frame per iteration.
@@ -261,8 +261,7 @@ impl<B: Backend> TtsBackbone<B> {
             // Semantic token: direct projection of h → logits → argmax
             let semantic_logits = fm.semantic_logits(h.clone()); // [1, semantic_output_size]
 
-            // Log top-3 logits for debugging
-            if tracing::enabled!(tracing::Level::DEBUG) {
+            if tracing::enabled!(tracing::Level::TRACE) {
                 let logits_data = semantic_logits.clone().to_data();
                 let logits_slice = logits_data.as_slice::<f32>().unwrap();
                 let mut indexed: Vec<(usize, f32)> =
@@ -270,7 +269,7 @@ impl<B: Backend> TtsBackbone<B> {
                 indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
                 let top3: Vec<(usize, f32)> =
                     indexed.iter().take(3).map(|&(i, v)| (i, v)).collect();
-                tracing::debug!(
+                tracing::trace!(
                     frame = frame_idx,
                     top3 = ?top3,
                     "Semantic logit distribution"
@@ -300,14 +299,14 @@ impl<B: Backend> TtsBackbone<B> {
                 burn::tensor::Distribution::Normal(0.0, 1.0),
                 device,
             );
-            let _acoustic_raw = fm.euler_ode_solve(h.clone(), noise.clone()); // [1, 36]
+            let acoustic_raw = fm.euler_ode_solve(h.clone(), noise.clone()); // [1, 36]
 
-            if tracing::enabled!(tracing::Level::DEBUG) {
-                let raw_data = _acoustic_raw.clone().to_data();
+            if tracing::enabled!(tracing::Level::TRACE) {
+                let raw_data = acoustic_raw.clone().to_data();
                 let raw_slice = raw_data.as_slice::<f32>().unwrap();
                 let first4: Vec<f32> = raw_slice.iter().take(4).copied().collect();
                 let raw_norm: f32 = raw_slice.iter().map(|x| x * x).sum::<f32>().sqrt();
-                tracing::debug!(
+                tracing::trace!(
                     frame = frame_idx,
                     ode_output = ?first4,
                     ode_norm = format!("{raw_norm:.2}"),
@@ -316,7 +315,7 @@ impl<B: Backend> TtsBackbone<B> {
             }
 
             // FSQ quantize: continuous R^36 → discrete indices [0, 20]
-            let acoustic_indices = Fsq::quantize(_acoustic_raw); // [1, 36]
+            let acoustic_indices = Fsq::quantize(acoustic_raw); // [1, 36]
             let acoustic_data = acoustic_indices.to_data();
             let acoustic_slice = acoustic_data.as_slice::<f32>().unwrap();
 
@@ -328,6 +327,8 @@ impl<B: Backend> TtsBackbone<B> {
             // The semantic_idx_val from argmax over the masked logits gives us a
             // "raw" index in [0, 8320). Indices 0-1 are specials, 2..8193 are VQ.
             // embed_semantic expects the raw VQ index (0..8191), so subtract 2.
+            // Note: EMPTY_AUDIO (idx 0) would map to raw_semantic 0 via saturating_sub —
+            // harmless since END_AUDIO (idx 1) is already caught above.
             let raw_semantic = semantic_idx_val.saturating_sub(2);
 
             frames.push(GeneratedFrame {
@@ -338,7 +339,7 @@ impl<B: Backend> TtsBackbone<B> {
             // Embed frame → next input for backbone
             let frame_embed = codebook.embed_frame(raw_semantic, &acoustic_levels); // [1, dim]
 
-            if tracing::enabled!(tracing::Level::DEBUG) {
+            if tracing::enabled!(tracing::Level::TRACE) {
                 let fe_norm: f32 = frame_embed
                     .clone()
                     .powf_scalar(2.0)
@@ -346,7 +347,7 @@ impl<B: Backend> TtsBackbone<B> {
                     .sqrt()
                     .into_scalar()
                     .elem();
-                tracing::debug!(
+                tracing::trace!(
                     frame = frame_idx,
                     frame_embed_norm = format!("{fe_norm:.2}"),
                     acoustic_levels = ?&acoustic_levels[..4],
@@ -440,6 +441,58 @@ mod tests {
 
     type TestBackend = Wgpu;
 
+    /// Build a small TtsBackbone with random weights for shape testing.
+    fn make_test_backbone(
+        device: &<TestBackend as burn::tensor::backend::Backend>::Device,
+    ) -> TtsBackbone<TestBackend> {
+        use crate::models::layers::DecoderLayerConfig;
+
+        let config = TtsBackboneConfig {
+            n_layers: 2,
+            dim: 64,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 16,
+            ffn_dim: 256,
+            rope_theta: 10_000.0,
+            vocab_size: 100,
+            tied_embeddings: true,
+            norm_eps: 1e-5,
+        };
+
+        let mut layers = Vec::new();
+        for _ in 0..config.n_layers {
+            let layer = DecoderLayerConfig::new(
+                config.dim,
+                config.n_heads,
+                config.n_kv_heads,
+                config.head_dim,
+                config.ffn_dim,
+            )
+            .with_sliding_window(None)
+            .init::<TestBackend>(device);
+            layers.push(layer);
+        }
+
+        let norm =
+            crate::models::layers::RmsNormConfig::new(config.dim).init::<TestBackend>(device);
+        let tok_embeddings =
+            burn::nn::EmbeddingConfig::new(config.vocab_size, config.dim).init(device);
+        let audio_codebook_embeddings = Tensor::<TestBackend, 2>::zeros([9088, config.dim], device);
+        let rope = RoPEConfig::new(config.head_dim, 1024)
+            .with_theta(config.rope_theta)
+            .init::<TestBackend>(device);
+
+        TtsBackbone {
+            layers,
+            norm,
+            tok_embeddings,
+            audio_codebook_embeddings,
+            rope,
+            config,
+        }
+    }
+
     #[test]
     fn test_tts_layer_weight_names() {
         let names = tts_layer_weight_names(0);
@@ -454,135 +507,41 @@ mod tests {
     #[test]
     fn test_backbone_forward_shape() {
         let device = Default::default();
-
-        // Build a small backbone via config init (no weights)
-        let config = TtsBackboneConfig {
-            n_layers: 2,
-            dim: 64,
-            n_heads: 4,
-            n_kv_heads: 2,
-            head_dim: 16,
-            ffn_dim: 256,
-            rope_theta: 10_000.0,
-            vocab_size: 100,
-            tied_embeddings: true,
-            norm_eps: 1e-5,
-        };
-
-        // Manually construct a backbone with random weights for shape testing
-        use crate::models::layers::DecoderLayerConfig;
-        let mut layers = Vec::new();
-        for _ in 0..config.n_layers {
-            let layer = DecoderLayerConfig::new(
-                config.dim,
-                config.n_heads,
-                config.n_kv_heads,
-                config.head_dim,
-                config.ffn_dim,
-            )
-            .with_sliding_window(None)
-            .init::<TestBackend>(&device);
-            layers.push(layer);
-        }
-
-        let norm =
-            crate::models::layers::RmsNormConfig::new(config.dim).init::<TestBackend>(&device);
-
-        let tok_embeddings =
-            burn::nn::EmbeddingConfig::new(config.vocab_size, config.dim).init(&device);
-
-        let audio_codebook_embeddings =
-            Tensor::<TestBackend, 2>::zeros([9088, config.dim], &device);
-
-        let rope = RoPEConfig::new(config.head_dim, 1024)
-            .with_theta(config.rope_theta)
-            .init::<TestBackend>(&device);
-
-        let backbone = TtsBackbone {
-            layers,
-            norm,
-            tok_embeddings,
-            audio_codebook_embeddings,
-            rope,
-            config: config.clone(),
-        };
+        let backbone = make_test_backbone(&device);
+        let dim = backbone.config.dim;
+        let vocab_size = backbone.config.vocab_size;
 
         // Test forward
-        let x = Tensor::<TestBackend, 3>::zeros([1, 10, config.dim], &device);
+        let x = Tensor::<TestBackend, 3>::zeros([1, 10, dim], &device);
         let out = backbone.forward(x, 0);
-        assert_eq!(out.dims(), [1, 10, config.dim]);
+        assert_eq!(out.dims(), [1, 10, dim]);
 
         // Test embed_tokens
         let ids = Tensor::<TestBackend, 2, burn::tensor::Int>::zeros([1, 5], &device);
         let embedded = backbone.embed_tokens(ids);
-        assert_eq!(embedded.dims(), [1, 5, config.dim]);
+        assert_eq!(embedded.dims(), [1, 5, dim]);
 
         // Test LM head
         let logits = backbone.lm_head(out);
-        assert_eq!(logits.dims(), [1, 10, config.vocab_size]);
+        assert_eq!(logits.dims(), [1, 10, vocab_size]);
     }
 
     #[test]
     fn test_backbone_forward_with_cache() {
         let device = Default::default();
-
-        let config = TtsBackboneConfig {
-            n_layers: 2,
-            dim: 64,
-            n_heads: 4,
-            n_kv_heads: 2,
-            head_dim: 16,
-            ffn_dim: 256,
-            rope_theta: 10_000.0,
-            vocab_size: 100,
-            tied_embeddings: true,
-            norm_eps: 1e-5,
-        };
-
-        use crate::models::layers::DecoderLayerConfig;
-        let mut layers = Vec::new();
-        for _ in 0..config.n_layers {
-            let layer = DecoderLayerConfig::new(
-                config.dim,
-                config.n_heads,
-                config.n_kv_heads,
-                config.head_dim,
-                config.ffn_dim,
-            )
-            .init::<TestBackend>(&device);
-            layers.push(layer);
-        }
-
-        let norm =
-            crate::models::layers::RmsNormConfig::new(config.dim).init::<TestBackend>(&device);
-        let tok_embeddings =
-            burn::nn::EmbeddingConfig::new(config.vocab_size, config.dim).init(&device);
-        let audio_codebook_embeddings =
-            Tensor::<TestBackend, 2>::zeros([9088, config.dim], &device);
-        let rope = RoPEConfig::new(config.head_dim, 1024)
-            .with_theta(config.rope_theta)
-            .init::<TestBackend>(&device);
-
-        let backbone = TtsBackbone {
-            layers,
-            norm,
-            tok_embeddings,
-            audio_codebook_embeddings,
-            rope,
-            config,
-        };
-
+        let backbone = make_test_backbone(&device);
+        let dim = backbone.config.dim;
         let mut caches = backbone.create_cache();
 
         // Prefill
-        let x = Tensor::<TestBackend, 3>::zeros([1, 10, 64], &device);
+        let x = Tensor::<TestBackend, 3>::zeros([1, 10, dim], &device);
         let out = backbone.forward_with_cache(x, &mut caches);
-        assert_eq!(out.dims(), [1, 10, 64]);
+        assert_eq!(out.dims(), [1, 10, dim]);
 
         // Decode step
-        let x = Tensor::<TestBackend, 3>::zeros([1, 1, 64], &device);
+        let x = Tensor::<TestBackend, 3>::zeros([1, 1, dim], &device);
         let out = backbone.forward_with_cache(x, &mut caches);
-        assert_eq!(out.dims(), [1, 1, 64]);
+        assert_eq!(out.dims(), [1, 1, dim]);
     }
 
     #[test]
@@ -632,70 +591,25 @@ mod tests {
     fn test_prefill_and_decode_shapes_with_cache() {
         // Verify that the prefill+decode pattern used in generate() works correctly
         let device = Default::default();
-
-        let config = TtsBackboneConfig {
-            n_layers: 2,
-            dim: 64,
-            n_heads: 4,
-            n_kv_heads: 2,
-            head_dim: 16,
-            ffn_dim: 256,
-            rope_theta: 10_000.0,
-            vocab_size: 100,
-            tied_embeddings: true,
-            norm_eps: 1e-5,
-        };
-
-        use crate::models::layers::DecoderLayerConfig;
-        let mut layers = Vec::new();
-        for _ in 0..config.n_layers {
-            let layer = DecoderLayerConfig::new(
-                config.dim,
-                config.n_heads,
-                config.n_kv_heads,
-                config.head_dim,
-                config.ffn_dim,
-            )
-            .init::<TestBackend>(&device);
-            layers.push(layer);
-        }
-
-        let norm =
-            crate::models::layers::RmsNormConfig::new(config.dim).init::<TestBackend>(&device);
-        let tok_embeddings =
-            burn::nn::EmbeddingConfig::new(config.vocab_size, config.dim).init(&device);
-        let audio_codebook_embeddings =
-            Tensor::<TestBackend, 2>::zeros([9088, config.dim], &device);
-        let rope = RoPEConfig::new(config.head_dim, 1024)
-            .with_theta(config.rope_theta)
-            .init::<TestBackend>(&device);
-
-        let backbone = TtsBackbone {
-            layers,
-            norm,
-            tok_embeddings,
-            audio_codebook_embeddings,
-            rope,
-            config,
-        };
-
+        let backbone = make_test_backbone(&device);
+        let dim = backbone.config.dim;
         let mut caches = backbone.create_cache();
 
         // Prefill: 10 tokens
-        let input_seq = Tensor::<TestBackend, 3>::zeros([1, 10, 64], &device);
+        let input_seq = Tensor::<TestBackend, 3>::zeros([1, 10, dim], &device);
         let prefill_out = backbone.forward_with_cache(input_seq, &mut caches);
-        assert_eq!(prefill_out.dims(), [1, 10, 64]);
+        assert_eq!(prefill_out.dims(), [1, 10, dim]);
 
         // Extract last hidden state (what generate does)
-        let [batch, seq_len, dim] = prefill_out.dims();
-        let h = prefill_out.slice([0..batch, (seq_len - 1)..seq_len, 0..dim]);
-        assert_eq!(h.dims(), [1, 1, 64]);
+        let [batch, seq_len, d] = prefill_out.dims();
+        let h = prefill_out.slice([0..batch, (seq_len - 1)..seq_len, 0..d]);
+        assert_eq!(h.dims(), [1, 1, dim]);
 
         // Multiple single-step decodes (simulating the decode loop)
         for _ in 0..5 {
-            let step_input = Tensor::<TestBackend, 3>::zeros([1, 1, 64], &device);
+            let step_input = Tensor::<TestBackend, 3>::zeros([1, 1, dim], &device);
             let step_out = backbone.forward_with_cache(step_input, &mut caches);
-            assert_eq!(step_out.dims(), [1, 1, 64]);
+            assert_eq!(step_out.dims(), [1, 1, dim]);
         }
     }
 }

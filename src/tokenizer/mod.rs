@@ -20,10 +20,12 @@ pub use encoder::TekkenEncoder;
 /// Tekken tokenizer configuration from JSON.
 #[derive(Debug, Deserialize)]
 struct TekkenConfig {
+    #[allow(dead_code)]
     pattern: String,
     #[allow(dead_code)]
     num_vocab_tokens: usize,
     default_vocab_size: usize,
+    #[allow(dead_code)]
     default_num_special_tokens: usize,
     #[allow(dead_code)]
     version: String,

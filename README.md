@@ -75,6 +75,10 @@ uv run --with huggingface_hub \
 cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- \
   --text "Hello world" --voice casual_female --output hello.wav
 
+# Control generation length (default: 2000 frames)
+cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- \
+  --text "Short." --voice alloy --max-frames 500
+
 # List available voices
 cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- --list-voices
 ```

@@ -11,6 +11,8 @@ pub mod model;
 pub mod op;
 pub mod reader;
 pub mod tensor;
+pub mod tts_loader;
+pub mod tts_model;
 
 #[cfg(test)]
 mod tests;
@@ -24,3 +26,5 @@ pub use model::{
 pub use op::q4_matmul;
 pub use reader::{GgmlDtype, GgufReader, GgufTensorInfo, ShardedCursor};
 pub use tensor::Q4Tensor;
+pub use tts_loader::{Q4TtsModelLoader, Q4TtsModelParts};
+pub use tts_model::{Q4FmLayer, Q4FmTransformer, Q4TtsBackbone, Q4TtsDecoderLayer};

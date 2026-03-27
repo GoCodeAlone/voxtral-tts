@@ -473,7 +473,7 @@ impl Q4AudioEncoder {
 /// - **Q4**: kept as Q4_0 on GPU (lm_head via Q4 matmul) with a CPU byte
 ///   copy for embed_tokens row lookups. Used on WASM where a single GPU
 ///   buffer > ~256 MB is rejected by WebGPU.
-enum TokEmbedStore {
+pub(crate) enum TokEmbedStore {
     F32(Tensor<Wgpu, 2>),
     Q4 {
         lm_head: Q4Linear,

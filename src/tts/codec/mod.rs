@@ -67,6 +67,30 @@ pub struct CodecDecoder<B: Backend> {
 }
 
 impl<B: Backend> CodecDecoder<B> {
+    /// Create a codec decoder from pre-loaded components (for GGUF loading).
+    ///
+    /// `transformer_group_layers` is a Vec of 4 groups, each a Vec of layers.
+    pub fn from_components(
+        input_conv: CausalConv1d<B>,
+        transformer_group_layers: Vec<Vec<CodecTransformerLayer<B>>>,
+        upsample_convs: Vec<CausalConvTranspose1d<B>>,
+        output_conv: CausalConv1d<B>,
+        vq_codebook: VqCodebook<B>,
+    ) -> Self {
+        let transformer_groups = transformer_group_layers
+            .into_iter()
+            .map(|layers| TransformerGroup { layers })
+            .collect();
+
+        Self {
+            input_conv,
+            transformer_groups,
+            upsample_convs,
+            output_conv,
+            vq_codebook,
+        }
+    }
+
     /// Load the full codec decoder from SafeTensors.
     ///
     /// # Arguments

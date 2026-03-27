@@ -42,11 +42,12 @@ jobs:
       - name: Run tests (GPU-dependent tests skipped — no adapter in CI)
         run: |
           cargo test --features "wgpu,cli,hub" -- \
-            --skip "gguf::tests" \
+            --skip "gguf::" \
             --skip "models::adapter::tests" \
             --skip "models::decoder::tests" \
             --skip "models::encoder::tests" \
             --skip "models::layers" \
             --skip "models::time_embedding::tests" \
             --skip "models::voxtral::tests" \
-            --skip "test_q4_roundtrip"
+            --skip "tts::" \
+            --skip "test_q4_"
