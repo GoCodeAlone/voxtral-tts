@@ -276,25 +276,26 @@ impl<B: Backend> FmTransformer<B> {
 
     /// Run the Euler ODE solver with classifier-free guidance to predict acoustic tokens.
     ///
-    /// Starting from Gaussian noise `x_1 ~ N(0, 1)` in R^36, performs 8 Euler steps
-    /// with CFG (alpha=1.2) to produce the final acoustic state `x_0`.
+    /// Starting from Gaussian noise `x_0 ~ N(0, 1)` in R^36, performs Euler steps
+    /// from t=0 (noise) to t=1 (signal) with CFG (alpha=1.2).
     ///
-    /// Per step at time `t`:
-    /// 1. `v_cond = predict_velocity(h, x_t, t)` — conditional velocity
-    /// 2. `v_uncond = predict_velocity(zeros, x_t, t)` — unconditional velocity
+    /// Timesteps: `linspace(0, 1, euler_steps)` → N points, N-1 intervals.
+    ///
+    /// Per step from `t[i]` to `t[i+1]`:
+    /// 1. `v_cond = predict_velocity(h, x_t, t[i])` — conditional velocity
+    /// 2. `v_uncond = predict_velocity(zeros, x_t, t[i])` — unconditional velocity
     /// 3. `v = alpha * v_cond + (1 - alpha) * v_uncond` — CFG blend
-    /// 4. `x_{t-dt} = x_t - v * dt`
+    /// 4. `x_{t+dt} = x_t + v * dt`
     ///
     /// # Arguments
     /// * `h` - Backbone hidden state [1, 1, dim]
     /// * `noise` - Initial noise sample [1, acoustic_dim] (typically from N(0,1))
     ///
     /// # Returns
-    /// Final acoustic state `x_0` [1, acoustic_dim] ready for FSQ quantization.
+    /// Final acoustic state [1, acoustic_dim] ready for FSQ quantization.
     pub fn euler_ode_solve(&self, h: Tensor<B, 3>, noise: Tensor<B, 2>) -> Tensor<B, 2> {
         let device = h.device();
-        let steps = self.config.euler_steps;
-        let dt = 1.0 / steps as f32;
+        let n_points = self.config.euler_steps; // 8 points → 7 intervals
         let alpha = self.config.cfg_alpha;
 
         // Zero hidden state for unconditional pass
@@ -303,8 +304,10 @@ impl<B: Backend> FmTransformer<B> {
 
         let mut x_t = noise; // [1, acoustic_dim]
 
-        for step in 0..steps {
-            let t = 1.0 - (step as f32) * dt;
+        // linspace(0, 1, n_points): iterate over N-1 intervals
+        for step in 0..(n_points - 1) {
+            let t = step as f32 / (n_points - 1) as f32;
+            let dt = 1.0 / (n_points - 1) as f32;
 
             // Reshape x_t to [1, 1, acoustic_dim] for predict_velocity
             let [b, acoustic_dim] = x_t.dims();
@@ -319,8 +322,8 @@ impl<B: Backend> FmTransformer<B> {
             // CFG: v = alpha * v_cond + (1 - alpha) * v_uncond
             let v = v_cond * alpha + v_uncond * (1.0 - alpha);
 
-            // Euler step: x_{t-dt} = x_t - v * dt
-            x_t = x_t - v * dt;
+            // Euler step: x_{t+dt} = x_t + v * dt (forward in time)
+            x_t = x_t + v * dt;
         }
 
         x_t

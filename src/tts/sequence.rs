@@ -3,7 +3,7 @@
 //! Builds the TTS input sequence from voice embeddings and tokenized text
 //! (per vLLM/mistral-common reference):
 //! ```text
-//! [BOS(1)] [BEGIN_AUDIO(25)] [voice_0..N] [NEXT_AUDIO_TEXT(35)] [text_0..M] [REPEAT_AUDIO_TEXT(36)] [BEGIN_AUDIO(25)]
+//! [BOS(1)] [BEGIN_AUDIO(25)] [voice_0..N] [NEXT_AUDIO_TEXT(36)] [text_0..M] [REPEAT_AUDIO_TEXT(35)] [BEGIN_AUDIO(25)]
 //! ```
 //!
 //! - Voice embeddings are raw [3072] vectors (from pre-encoded `.safetensors` files)
@@ -36,7 +36,7 @@ pub fn build_input_sequence<B: Backend>(
     let [_vocab, dim] = tok_embeddings.dims();
 
     // Embed special tokens via tok_embeddings lookup
-    // Sequence: [BOS(1)] [BEGIN_AUDIO(25)] [voice_0..N] [NEXT_AUDIO_TEXT(35)] [text_0..M] [REPEAT_AUDIO_TEXT(36)] [BEGIN_AUDIO(25)]
+    // Sequence: [BOS(1)] [BEGIN_AUDIO(25)] [voice_0..N] [NEXT_AUDIO_TEXT(36)] [text_0..M] [REPEAT_AUDIO_TEXT(35)] [BEGIN_AUDIO(25)]
     let bos_embed = lookup_token(tok_embeddings, special_tokens.bos_token_id as usize, dim);
     let begin_audio_embed = lookup_token(
         tok_embeddings,
@@ -127,8 +127,9 @@ mod tests {
 
     #[test]
     fn test_expected_seq_len() {
-        assert_eq!(expected_seq_len(10, 5), 1 + 10 + 1 + 5 + 1);
-        assert_eq!(expected_seq_len(0, 0), 3); // BOS + next + repeat
+        // 1(BOS) + 1(BEGIN_AUDIO) + voice + 1(NEXT) + text + 1(REPEAT) + 1(BEGIN_AUDIO)
+        assert_eq!(expected_seq_len(10, 5), 1 + 1 + 10 + 1 + 5 + 1 + 1);
+        assert_eq!(expected_seq_len(0, 0), 5); // BOS + BEGIN_AUDIO + NEXT + REPEAT + BEGIN_AUDIO
     }
 
     #[test]
@@ -149,8 +150,8 @@ mod tests {
             &special_tokens,
         );
 
-        // seq_len = 1 (BOS) + 5 (voice) + 1 (next) + 3 (text) + 1 (repeat) = 11
-        assert_eq!(seq.dims(), [1, 11, dim]);
+        // seq_len = 1(BOS) + 1(BEGIN_AUDIO) + 5(voice) + 1(NEXT) + 3(text) + 1(REPEAT) + 1(BEGIN_AUDIO) = 13
+        assert_eq!(seq.dims(), [1, 13, dim]);
     }
 
     #[test]
@@ -173,8 +174,8 @@ mod tests {
             &special_tokens,
         );
 
-        // seq_len = 1 + 2 + 1 + 2 + 1 = 7
-        assert_eq!(seq.dims(), [1, 7, dim]);
+        // seq_len = 1(BOS) + 1(BEGIN_AUDIO) + 2(voice) + 1(NEXT) + 2(text) + 1(REPEAT) + 1(BEGIN_AUDIO) = 9
+        assert_eq!(seq.dims(), [1, 9, dim]);
 
         let data = seq.to_data();
         let slice = data.as_slice::<f32>().unwrap();
@@ -185,19 +186,41 @@ mod tests {
         // Position 0: BOS (token_id=1)
         assert_eq!(val_at(0), 1.0, "pos 0 should be BOS embed (token 1)");
 
-        // Positions 1-2: voice embeddings (filled with 999.0)
-        assert_eq!(val_at(1), 999.0, "pos 1 should be voice embed");
+        // Position 1: BEGIN_AUDIO (token_id=25)
+        assert_eq!(
+            val_at(1),
+            25.0,
+            "pos 1 should be BEGIN_AUDIO embed (token 25)"
+        );
+
+        // Positions 2-3: voice embeddings (filled with 999.0)
         assert_eq!(val_at(2), 999.0, "pos 2 should be voice embed");
+        assert_eq!(val_at(3), 999.0, "pos 3 should be voice embed");
 
-        // Position 3: next token (begin_audio_token_id=25)
-        assert_eq!(val_at(3), 25.0, "pos 3 should be next embed (token 25)");
+        // Position 4: NEXT_AUDIO_TEXT (token_id=36)
+        assert_eq!(
+            val_at(4),
+            36.0,
+            "pos 4 should be NEXT_AUDIO_TEXT embed (token 36)"
+        );
 
-        // Positions 4-5: text tokens (42, 77)
-        assert_eq!(val_at(4), 42.0, "pos 4 should be text token 42");
-        assert_eq!(val_at(5), 77.0, "pos 5 should be text token 77");
+        // Positions 5-6: text tokens (42, 77)
+        assert_eq!(val_at(5), 42.0, "pos 5 should be text token 42");
+        assert_eq!(val_at(6), 77.0, "pos 6 should be text token 77");
 
-        // Position 6: repeat token (audio_token_id=24)
-        assert_eq!(val_at(6), 24.0, "pos 6 should be repeat embed (token 24)");
+        // Position 7: REPEAT_AUDIO_TEXT (token_id=35)
+        assert_eq!(
+            val_at(7),
+            35.0,
+            "pos 7 should be REPEAT_AUDIO_TEXT embed (token 35)"
+        );
+
+        // Position 8: BEGIN_AUDIO (token_id=25)
+        assert_eq!(
+            val_at(8),
+            25.0,
+            "pos 8 should be trailing BEGIN_AUDIO embed (token 25)"
+        );
     }
 
     #[test]
@@ -218,8 +241,8 @@ mod tests {
             &special_tokens,
         );
 
-        // seq_len = 1 + 3 + 1 + 0 + 1 = 6
-        assert_eq!(seq.dims(), [1, 6, dim]);
+        // seq_len = 1(BOS) + 1(BEGIN_AUDIO) + 3(voice) + 1(NEXT) + 0(text) + 1(REPEAT) + 1(BEGIN_AUDIO) = 8
+        assert_eq!(seq.dims(), [1, 8, dim]);
     }
 
     #[test]
@@ -240,18 +263,20 @@ mod tests {
             &special_tokens,
         );
 
-        // seq_len = 1 + 1 + 1 + 1 + 1 = 5
-        assert_eq!(seq.dims(), [1, 5, dim]);
+        // seq_len = 1(BOS) + 1(BEGIN_AUDIO) + 1(voice) + 1(NEXT) + 1(text) + 1(REPEAT) + 1(BEGIN_AUDIO) = 7
+        assert_eq!(seq.dims(), [1, 7, dim]);
 
         let data = seq.to_data();
         let slice = data.as_slice::<f32>().unwrap();
         let val_at = |pos: usize| slice[pos * dim];
 
         assert_eq!(val_at(0), 1.0, "BOS");
-        assert_eq!(val_at(1), 500.0, "voice");
-        assert_eq!(val_at(2), 25.0, "next");
-        assert_eq!(val_at(3), 10.0, "text");
-        assert_eq!(val_at(4), 24.0, "repeat");
+        assert_eq!(val_at(1), 25.0, "BEGIN_AUDIO");
+        assert_eq!(val_at(2), 500.0, "voice");
+        assert_eq!(val_at(3), 36.0, "NEXT_AUDIO_TEXT");
+        assert_eq!(val_at(4), 10.0, "text");
+        assert_eq!(val_at(5), 35.0, "REPEAT_AUDIO_TEXT");
+        assert_eq!(val_at(6), 25.0, "trailing BEGIN_AUDIO");
     }
 
     #[test]

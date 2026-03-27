@@ -12,8 +12,8 @@ default = ["wgpu", "native-tokenizer"]
 wgpu = ["burn/wgpu"]
 cli = ["clap", "indicatif"]
 hub = ["hf-hub"]
-# Native tokenizer (has C dependencies, not WASM compatible)
-native-tokenizer = ["tokenizers"]
+# Tekken BPE encoding via tiktoken (WASM-compatible, no C deps)
+native-tokenizer = ["tiktoken-rs"]
 # WASM/browser support - uses wgpu (WebGPU) backend for GPU inference
 wasm = [
     "wgpu",
@@ -32,8 +32,8 @@ profiling = ["tracing-chrome"]
 burn = { version = "0.20", default-features = false, features = ["std", "autodiff", "template"] }
 cubecl = { version = "0.9", default-features = false, features = ["wgpu"] }
 
-# Tokenization (native only - has C dependencies)
-tokenizers = { version = "0.22", optional = true }
+# Tekken BPE encoding (tiktoken core, WASM-compatible)
+tiktoken-rs = { version = "0.9", optional = true }
 base64 = "0.22"
 
 # Audio processing
@@ -51,7 +51,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-chrome = { version = "0.7", optional = true }
 num-traits = "0.2"
 num-complex = "0.4"
@@ -80,6 +80,7 @@ console_error_panic_hook = { version = "0.1", optional = true }
 getrandom = { version = "0.3", default-features = false, optional = true }
 # Direct wgpu dep for custom device init (must match cubecl-wgpu's version)
 wgpu = { version = "26", features = ["fragile-send-sync-non-atomic-wasm"], optional = true }
+rustc-hash = "1.1"
 
 [dev-dependencies]
 criterion = "0.8"

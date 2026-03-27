@@ -249,13 +249,44 @@ impl<B: Backend> TtsBackbone<B> {
         let [batch, seq_len, dim] = prefill_out.dims();
         let mut h = prefill_out.slice([0..batch, (seq_len - 1)..seq_len, 0..dim]); // [1, 1, dim]
 
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let h_data = h.clone().reshape([dim]).to_data();
+            let h_slice = h_data.as_slice::<f32>().unwrap();
+            let h_norm: f32 = h_slice.iter().map(|x| x * x).sum::<f32>().sqrt();
+            tracing::debug!(h_norm = format!("{h_norm:.4}"), "Prefill hidden state");
+        }
+
         // Phase 2: Decode loop — one frame per iteration.
         for frame_idx in 0..max_frames {
             // Semantic token: direct projection of h → logits → argmax
             let semantic_logits = fm.semantic_logits(h.clone()); // [1, semantic_output_size]
+
+            // Log top-3 logits for debugging
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let logits_data = semantic_logits.clone().to_data();
+                let logits_slice = logits_data.as_slice::<f32>().unwrap();
+                let mut indexed: Vec<(usize, f32)> =
+                    logits_slice.iter().copied().enumerate().collect();
+                indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                let top3: Vec<(usize, f32)> =
+                    indexed.iter().take(3).map(|&(i, v)| (i, v)).collect();
+                tracing::debug!(
+                    frame = frame_idx,
+                    top3 = ?top3,
+                    "Semantic logit distribution"
+                );
+            }
+
             let semantic_idx = semantic_logits.argmax(1); // [1, 1]
             let semantic_idx_val: i32 = semantic_idx.into_scalar().elem();
             let semantic_idx_val = semantic_idx_val as usize;
+
+            // Log semantic token for debugging
+            tracing::debug!(
+                frame = frame_idx,
+                semantic_idx = semantic_idx_val,
+                "Generated semantic token"
+            );
 
             // Check for END_AUDIO (index 1 in the semantic codebook output)
             if semantic_idx_val == 1 {
@@ -269,8 +300,20 @@ impl<B: Backend> TtsBackbone<B> {
                 burn::tensor::Distribution::Normal(0.0, 1.0),
                 device,
             );
-            // TODO: Debug - try with neutral acoustics vs real ODE
-            let _acoustic_raw = fm.euler_ode_solve(h, noise); // [1, 36]
+            let _acoustic_raw = fm.euler_ode_solve(h.clone(), noise.clone()); // [1, 36]
+
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let raw_data = _acoustic_raw.clone().to_data();
+                let raw_slice = raw_data.as_slice::<f32>().unwrap();
+                let first4: Vec<f32> = raw_slice.iter().take(4).copied().collect();
+                let raw_norm: f32 = raw_slice.iter().map(|x| x * x).sum::<f32>().sqrt();
+                tracing::debug!(
+                    frame = frame_idx,
+                    ode_output = ?first4,
+                    ode_norm = format!("{raw_norm:.2}"),
+                    "ODE solver output"
+                );
+            }
 
             // FSQ quantize: continuous R^36 → discrete indices [0, 20]
             let acoustic_indices = Fsq::quantize(_acoustic_raw); // [1, 36]
@@ -281,8 +324,6 @@ impl<B: Backend> TtsBackbone<B> {
             for (i, &v) in acoustic_slice.iter().enumerate().take(36) {
                 acoustic_levels[i] = v as usize;
             }
-            // Use real ODE acoustics
-            // let acoustic_levels = [10usize; 36]; // DEBUG: neutral acoustics
 
             // The semantic_idx_val from argmax over the masked logits gives us a
             // "raw" index in [0, 8320). Indices 0-1 are specials, 2..8193 are VQ.
@@ -296,6 +337,23 @@ impl<B: Backend> TtsBackbone<B> {
 
             // Embed frame → next input for backbone
             let frame_embed = codebook.embed_frame(raw_semantic, &acoustic_levels); // [1, dim]
+
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let fe_norm: f32 = frame_embed
+                    .clone()
+                    .powf_scalar(2.0)
+                    .sum()
+                    .sqrt()
+                    .into_scalar()
+                    .elem();
+                tracing::debug!(
+                    frame = frame_idx,
+                    frame_embed_norm = format!("{fe_norm:.2}"),
+                    acoustic_levels = ?&acoustic_levels[..4],
+                    "Frame feedback"
+                );
+            }
+
             let next_input = frame_embed.unsqueeze_dim::<3>(0); // [1, 1, dim]
 
             // Forward through backbone with cache → next hidden state

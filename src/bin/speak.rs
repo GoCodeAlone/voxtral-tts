@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::info;
 
+use voxtral_mini_realtime::tokenizer::TekkenEncoder;
 use voxtral_mini_realtime::tts::pipeline::TtsPipeline;
 
 type Backend = Wgpu;
@@ -31,7 +32,7 @@ struct Cli {
     #[arg(short, long, default_value = "output.wav")]
     output: String,
 
-    /// Path to tokenizer JSON (defaults to <model>/tekken.json).
+    /// Path to Tekken tokenizer JSON (defaults to <model>/tekken.json).
     #[arg(long)]
     tokenizer: Option<String>,
 
@@ -43,8 +44,7 @@ struct Cli {
     #[arg(long, default_value_t = 2000)]
     max_frames: usize,
 
-    /// Pre-tokenized token IDs (comma-separated). Bypasses text tokenization.
-    /// Use `mistral-common` Python package to tokenize: Tekkenizer.encode(text, False, False)
+    /// Pre-tokenized token IDs (comma-separated). Bypasses Tekken text tokenization.
     #[arg(long, value_delimiter = ',')]
     token_ids: Option<Vec<u32>>,
 }
@@ -53,6 +53,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_target(false)
         .with_writer(std::io::stderr)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
     let cli = Cli::parse();
@@ -101,7 +102,7 @@ fn main() -> Result<()> {
         );
     }
 
-    // Get token IDs — either pre-tokenized or via text tokenization
+    // Get token IDs — either pre-tokenized or via Tekken BPE encoding
     let token_ids: Vec<u32> = if let Some(ids) = &cli.token_ids {
         info!(n_tokens = ids.len(), "Using pre-tokenized IDs");
         ids.clone()
@@ -114,15 +115,12 @@ fn main() -> Result<()> {
             bail!("Tokenizer not found at {}", tokenizer_path.display());
         }
 
-        info!("Loading tokenizer from {}", tokenizer_path.display());
-        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
+        info!("Loading Tekken tokenizer from {}", tokenizer_path.display());
+        let encoder =
+            TekkenEncoder::from_file(&tokenizer_path).context("Failed to load Tekken tokenizer")?;
 
         info!(text = %text, voice = %cli.voice, "Synthesizing speech");
-        let encoding = tokenizer
-            .encode(text, false)
-            .map_err(|e| anyhow::anyhow!("Failed to tokenize text: {e}"))?;
-        encoding.get_ids().to_vec()
+        encoder.encode(text)
     };
     info!(n_tokens = token_ids.len(), "Text tokenized");
 
