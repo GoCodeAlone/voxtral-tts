@@ -344,7 +344,9 @@ mod tests {
         // VQ codebook: tiny
         let embed_sum = Tensor::<TestBackend, 2>::ones([16, 4], device);
         let usage = Tensor::<TestBackend, 1>::ones([16], device);
-        let vq_codebook = VqCodebook::new(embed_sum, usage);
+        let cpu_norm =
+            VqCodebook::<TestBackend>::precompute_normalized(&vec![1.0; 64], &vec![1.0; 16], 16, 4);
+        let vq_codebook = VqCodebook::new(embed_sum, usage, cpu_norm);
 
         CodecDecoder {
             input_conv,

@@ -74,21 +74,63 @@ pub const VQ_EMBED_DIM: usize = 256;
 /// Uses EMA (Exponential Moving Average) codebook: the embedding for each
 /// entry is `embedding_sum / cluster_usage`. This normalizes accumulated
 /// embeddings by how often each codebook entry was used during training.
+///
+/// Pre-normalizes embeddings to CPU cache at construction to avoid GPU
+/// readback during dequantize() (required for WASM compatibility).
 #[derive(burn::module::Module, Debug)]
 pub struct VqCodebook<B: Backend> {
     /// Accumulated embeddings [8192, 256].
     embedding_sum: Param<Tensor<B, 2>>,
     /// Per-entry usage counts [8192].
     cluster_usage: Param<Tensor<B, 1>>,
+    /// CPU-cached normalized embeddings (embedding_sum / cluster_usage).
+    /// Populated at construction to avoid GPU readback during inference.
+    #[module(skip)]
+    cpu_normalized: Vec<f32>,
+    /// Embedding dimension.
+    #[module(skip)]
+    embed_dim: usize,
 }
 
 impl<B: Backend> VqCodebook<B> {
-    /// Create VQ codebook from loaded tensors.
-    pub fn new(embedding_sum: Tensor<B, 2>, cluster_usage: Tensor<B, 1>) -> Self {
+    /// Create VQ codebook from loaded tensors and pre-computed CPU cache.
+    ///
+    /// Use [`Self::precompute_normalized`] to build the CPU cache from raw
+    /// f32 slices (before uploading to GPU) to avoid GPU readback.
+    pub fn new(
+        embedding_sum: Tensor<B, 2>,
+        cluster_usage: Tensor<B, 1>,
+        cpu_normalized: Vec<f32>,
+    ) -> Self {
+        let embed_dim = embedding_sum.dims()[1];
         Self {
             embedding_sum: Param::initialized(ParamId::new(), embedding_sum),
             cluster_usage: Param::initialized(ParamId::new(), cluster_usage),
+            cpu_normalized,
+            embed_dim,
         }
+    }
+
+    /// Pre-compute normalized embeddings from raw f32 slices.
+    ///
+    /// Call this on CPU-side data BEFORE constructing tensors, to avoid
+    /// any GPU readback (required for WASM compatibility).
+    pub fn precompute_normalized(
+        embed_vals: &[f32],
+        usage_vals: &[f32],
+        n_entries: usize,
+        embed_dim: usize,
+    ) -> Vec<f32> {
+        let mut normalized = vec![0.0f32; n_entries * embed_dim];
+        for (idx, &usage) in usage_vals.iter().enumerate().take(n_entries) {
+            if usage > 0.0 {
+                let start = idx * embed_dim;
+                for j in 0..embed_dim {
+                    normalized[start + j] = embed_vals[start + j] / usage;
+                }
+            }
+        }
+        normalized
     }
 
     /// Load VQ codebook from SafeTensors.
@@ -111,7 +153,16 @@ impl<B: Backend> VqCodebook<B> {
         )
         .context("Loading VQ cluster_usage")?;
 
-        Ok(Self::new(embedding_sum, cluster_usage))
+        // Pre-compute normalized embeddings on CPU (sync readback OK on native)
+        let embed_data = embedding_sum.to_data();
+        let usage_data = cluster_usage.to_data();
+        let embed_vals = embed_data.as_slice::<f32>().unwrap();
+        let usage_vals = usage_data.as_slice::<f32>().unwrap();
+        let [n_entries, embed_dim] = embedding_sum.dims();
+        let cpu_normalized =
+            Self::precompute_normalized(embed_vals, usage_vals, n_entries, embed_dim);
+
+        Ok(Self::new(embedding_sum, cluster_usage, cpu_normalized))
     }
 
     /// Dequantize a batch of semantic token indices to embedding vectors.
@@ -124,31 +175,16 @@ impl<B: Backend> VqCodebook<B> {
     pub fn dequantize(&self, indices: &[usize]) -> Tensor<B, 2> {
         let device = self.embedding_sum.device();
         let n = indices.len();
-        let embed_dim = self.embedding_sum.dims()[1];
 
-        // Gather embeddings and usage counts for the given indices
-        let embed_data = self.embedding_sum.val().to_data();
-        let usage_data = self.cluster_usage.val().to_data();
-        let embed_vals = embed_data.as_slice::<f32>().unwrap();
-        let usage_vals = usage_data.as_slice::<f32>().unwrap();
-
-        let mut result = Vec::with_capacity(n * embed_dim);
+        // Use pre-normalized CPU cache (no GPU readback needed — WASM-safe)
+        let mut result = Vec::with_capacity(n * self.embed_dim);
         for &idx in indices {
-            let usage = usage_vals[idx];
-            let start = idx * embed_dim;
-            let end = start + embed_dim;
-
-            if usage > 0.0 {
-                for &v in &embed_vals[start..end] {
-                    result.push(v / usage);
-                }
-            } else {
-                // Zero usage: return zero vector
-                result.extend(std::iter::repeat_n(0.0f32, embed_dim));
-            }
+            let start = idx * self.embed_dim;
+            let end = start + self.embed_dim;
+            result.extend_from_slice(&self.cpu_normalized[start..end]);
         }
 
-        let data = burn::tensor::TensorData::new(result, [n, embed_dim]);
+        let data = burn::tensor::TensorData::new(result, [n, self.embed_dim]);
         Tensor::from_data(data, &device)
     }
 
@@ -326,12 +362,14 @@ mod tests {
         // Set entry 5 to zero usage
         usage_data[5] = 0.0;
 
+        let cpu_norm =
+            VqCodebook::<TestBackend>::precompute_normalized(&embed_data, &usage_data, n, dim);
         let embedding_sum =
             Tensor::<TestBackend, 2>::from_data(TensorData::new(embed_data, [n, dim]), &device);
         let cluster_usage =
             Tensor::<TestBackend, 1>::from_data(TensorData::new(usage_data, [n]), &device);
 
-        VqCodebook::new(embedding_sum, cluster_usage)
+        VqCodebook::new(embedding_sum, cluster_usage, cpu_norm)
     }
 
     #[test]

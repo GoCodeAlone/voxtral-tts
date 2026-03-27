@@ -289,33 +289,22 @@ impl Q4TtsBackbone {
     ) -> Result<Vec<crate::tts::backbone::GeneratedFrame>, String> {
         use crate::tts::backbone::GeneratedFrame;
         use crate::tts::codec::quantizer::Fsq;
-        use std::time::Instant;
 
         let acoustic_dim = fm.config().acoustic_dim;
         let [_, input_seq_len, _] = input_sequence.dims();
         let mut caches = self.create_cache(input_seq_len + max_frames);
         let mut frames = Vec::with_capacity(max_frames);
 
-        // Stage timing accumulators
-        let mut semantic_ms = 0u128;
-        let mut euler_ms = 0u128;
-        let readback_ms = 0u128;
-        let mut backbone_ms = 0u128;
-
         // Phase 1: Prefill — process the entire input sequence, populate KV caches.
-        let t0 = Instant::now();
         let prefill_out = self.forward_with_cache(input_sequence, &mut caches);
         let [batch, seq_len, dim] = prefill_out.dims();
         let mut h = prefill_out.slice([0..batch, (seq_len - 1)..seq_len, 0..dim]);
-        let prefill_ms = t0.elapsed().as_millis();
 
         // Phase 2: Decode loop — one frame per iteration.
         //
         // Dispatch semantic + euler in parallel before readback (both use h.clone()).
         // Single GPU sync per frame flushes all queued work.
         for frame_idx in 0..max_frames {
-            let t_frame = Instant::now();
-
             // Dispatch semantic + euler together (no sync yet)
             let semantic_logits = fm.semantic_logits(h.clone());
             let semantic_idx_f32 = semantic_logits.argmax(1).float(); // [1, 1] as f32
@@ -336,8 +325,6 @@ impl Q4TtsBackbone {
             let combined_slice = combined_data
                 .as_slice::<f32>()
                 .map_err(|e| format!("Failed to extract combined data: {e}"))?;
-            semantic_ms += t_frame.elapsed().as_millis();
-
             let semantic_idx_val = combined_slice[0] as usize;
 
             if semantic_idx_val == 1 {
@@ -347,7 +334,6 @@ impl Q4TtsBackbone {
 
             // Extract acoustic from combined readback (no additional sync)
             let acoustic_slice = &combined_slice[1..37];
-            euler_ms += 0; // No separate readback needed
 
             let mut acoustic_levels = [0usize; 36];
             for (i, &v) in acoustic_slice.iter().enumerate().take(36) {
@@ -361,36 +347,12 @@ impl Q4TtsBackbone {
             });
 
             // Dispatch backbone forward for next frame (no sync)
-            let t5 = Instant::now();
             let frame_embed = codebook.embed_frame(raw_semantic, &acoustic_levels);
             let next_input = frame_embed.unsqueeze_dim::<3>(0);
             h = self.forward_with_cache(next_input, &mut caches);
-            backbone_ms += t5.elapsed().as_millis();
         }
 
-        let n = frames.len();
-        if n > 0 {
-            let decode_total = semantic_ms + euler_ms + readback_ms + backbone_ms;
-            let per_frame = decode_total / n as u128;
-            tracing::info!(
-                frames = n,
-                prefill_ms = prefill_ms,
-                decode_total_ms = decode_total,
-                semantic_ms = semantic_ms,
-                euler_ms = euler_ms,
-                readback_ms = readback_ms,
-                backbone_ms = backbone_ms,
-                per_frame_ms = per_frame,
-                "Q4 TTS timing breakdown"
-            );
-            // Also print directly for test visibility
-            eprintln!(
-                "  [timing] prefill={prefill_ms}ms  decode={decode_total}ms ({n} frames, {per_frame}ms/frame)"
-            );
-            eprintln!(
-                "  [timing] semantic={semantic_ms}ms  euler={euler_ms}ms  readback={readback_ms}ms  backbone={backbone_ms}ms"
-            );
-        }
+        tracing::info!(frames = frames.len(), "Q4 TTS generation complete");
 
         Ok(frames)
     }

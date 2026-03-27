@@ -76,7 +76,11 @@ impl Q4TtsModelParts {
             self.device,
         );
 
-        // Fuse projections for faster decode (one-time cost)
+        // Fuse projections for faster decode (one-time cost).
+        // Skipped on WASM — fuse_projections uses sync GPU readback (read_bytes)
+        // which panics in browsers. The kernel launch savings matter less on WebGPU
+        // anyway since dispatch overhead is dominated by JS→GPU communication.
+        #[cfg(not(target_family = "wasm"))]
         backbone.fuse_projections();
 
         Ok((backbone, self.fm, self.codec))
@@ -687,22 +691,56 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
     }
 
     /// Load VQ codebook from GGUF.
+    ///
+    /// Pre-computes normalized embeddings on CPU to avoid GPU readback
+    /// (required for WASM compatibility).
     fn load_vq_codebook(&mut self, device: &WgpuDevice) -> Result<VqCodebook<Wgpu>> {
-        let embedding_sum: Tensor<Wgpu, 2> = gguf_load_f32_tensor(
-            &mut self.reader,
-            "audio_tokenizer.quantizer.semantic_codebook.embedding_sum",
-            device,
-        )
-        .context("Loading VQ embedding_sum")?;
+        let embed_name = "audio_tokenizer.quantizer.semantic_codebook.embedding_sum";
+        let usage_name = "audio_tokenizer.quantizer.semantic_codebook.cluster_usage";
 
-        let cluster_usage: Tensor<Wgpu, 1> = gguf_load_f32_tensor(
-            &mut self.reader,
-            "audio_tokenizer.quantizer.semantic_codebook.cluster_usage",
-            device,
-        )
-        .context("Loading VQ cluster_usage")?;
+        // Read raw bytes from GGUF
+        let embed_info = self
+            .reader
+            .tensor_info(embed_name)
+            .with_context(|| format!("Tensor '{embed_name}' not found"))?
+            .clone();
+        let embed_shape = reverse_gguf_dims(embed_info.shape());
+        let embed_bytes = self
+            .reader
+            .tensor_data(embed_name)
+            .context("Reading VQ embedding_sum bytes")?;
+        let embed_f32: Vec<f32> = embed_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
 
-        Ok(VqCodebook::new(embedding_sum, cluster_usage))
+        let usage_bytes = self
+            .reader
+            .tensor_data(usage_name)
+            .context("Reading VQ cluster_usage bytes")?;
+        let usage_f32: Vec<f32> = usage_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        let n_entries = embed_shape[0];
+        let embed_dim = embed_shape[1];
+
+        // Pre-compute normalized embeddings on CPU (no GPU readback needed)
+        let cpu_normalized =
+            VqCodebook::<Wgpu>::precompute_normalized(&embed_f32, &usage_f32, n_entries, embed_dim);
+
+        // Create GPU tensors
+        let embedding_sum: Tensor<Wgpu, 2> =
+            Tensor::from_data(TensorData::new(embed_f32, embed_shape), device);
+        let cluster_usage: Tensor<Wgpu, 1> =
+            Tensor::from_data(TensorData::new(usage_f32, [n_entries]), device);
+
+        Ok(VqCodebook::new(
+            embedding_sum,
+            cluster_usage,
+            cpu_normalized,
+        ))
     }
 
     /// Load token embeddings (Q4_0 → dequantized f32).
