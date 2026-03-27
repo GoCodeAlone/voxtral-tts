@@ -261,83 +261,103 @@ impl Q4TtsBackbone {
     ) -> Result<Vec<crate::tts::backbone::GeneratedFrame>, String> {
         use crate::tts::backbone::GeneratedFrame;
         use crate::tts::codec::quantizer::Fsq;
+        use std::time::Instant;
 
         let acoustic_dim = fm.config().acoustic_dim;
         let mut caches = self.create_cache();
         let mut frames = Vec::with_capacity(max_frames);
 
-        // Phase 1: Prefill — process the entire input sequence, populate KV caches.
-        let prefill_out = self.forward_with_cache(input_sequence, &mut caches);
+        // Stage timing accumulators
+        let mut semantic_ms = 0u128;
+        let mut euler_ms = 0u128;
+        let mut readback_ms = 0u128;
+        let mut backbone_ms = 0u128;
 
-        // Extract the last hidden state from prefill as the first decode input
+        // Phase 1: Prefill — process the entire input sequence, populate KV caches.
+        let t0 = Instant::now();
+        let prefill_out = self.forward_with_cache(input_sequence, &mut caches);
         let [batch, seq_len, dim] = prefill_out.dims();
-        let mut h = prefill_out.slice([0..batch, (seq_len - 1)..seq_len, 0..dim]); // [1, 1, dim]
+        let mut h = prefill_out.slice([0..batch, (seq_len - 1)..seq_len, 0..dim]);
+        let prefill_ms = t0.elapsed().as_millis();
 
         // Phase 2: Decode loop — one frame per iteration.
         for frame_idx in 0..max_frames {
-            // Semantic token: projection → logits → argmax
-            let semantic_logits = fm.semantic_logits(h.clone()); // [1, semantic_output_size]
-            let semantic_idx = semantic_logits.argmax(1); // [1, 1]
+            // Semantic token
+            let t1 = Instant::now();
+            let semantic_logits = fm.semantic_logits(h.clone());
+            let semantic_idx = semantic_logits.argmax(1);
+            semantic_ms += t1.elapsed().as_millis();
 
-            // Async GPU readback (WASM-safe)
+            // Async GPU readback
+            let t2 = Instant::now();
             let semantic_idx_val: i32 = Tensor::<Wgpu, 2, Int>::into_data_async(semantic_idx)
                 .await
                 .map_err(|e| format!("Failed to read semantic index: {e}"))?
                 .to_vec::<i32>()
                 .map_err(|e| format!("Failed to extract semantic data: {e}"))?[0];
             let semantic_idx_val = semantic_idx_val as usize;
+            readback_ms += t2.elapsed().as_millis();
 
-            tracing::debug!(
-                frame = frame_idx,
-                semantic_idx = semantic_idx_val,
-                "Generated semantic token"
-            );
-
-            // Check for END_AUDIO (index 1)
             if semantic_idx_val == 1 {
                 tracing::info!(frame = frame_idx, "END_AUDIO token detected, stopping");
                 break;
             }
 
-            // Acoustic tokens: Euler ODE from noise → FSQ quantize
+            // Euler ODE solve (batched CFG)
+            let t3 = Instant::now();
             let noise: Tensor<Wgpu, 2> = Tensor::random(
                 [1, acoustic_dim],
                 burn::tensor::Distribution::Normal(0.0, 1.0),
                 &self.device,
             );
-            let acoustic_raw = fm.euler_ode_solve(h.clone(), noise); // [1, 36]
+            let acoustic_raw = fm.euler_ode_solve(h.clone(), noise);
+            let acoustic_indices = Fsq::quantize(acoustic_raw);
+            euler_ms += t3.elapsed().as_millis();
 
-            // FSQ quantize: continuous R^36 → discrete indices [0, 20]
-            let acoustic_indices = Fsq::quantize(acoustic_raw); // [1, 36]
-
-            // Async GPU readback for acoustic data
+            // Async readback for acoustic data
+            let t4 = Instant::now();
             let acoustic_data = Tensor::<Wgpu, 2>::into_data_async(acoustic_indices)
                 .await
                 .map_err(|e| format!("Failed to read acoustic indices: {e}"))?;
             let acoustic_slice = acoustic_data
                 .as_slice::<f32>()
                 .map_err(|e| format!("Failed to extract acoustic data: {e}"))?;
+            readback_ms += t4.elapsed().as_millis();
 
             let mut acoustic_levels = [0usize; 36];
             for (i, &v) in acoustic_slice.iter().enumerate().take(36) {
                 acoustic_levels[i] = v as usize;
             }
 
-            // Map semantic index: subtract 2 to get raw VQ index (0..8191)
             let raw_semantic = semantic_idx_val.saturating_sub(2);
-
             frames.push(GeneratedFrame {
                 semantic_idx: raw_semantic,
                 acoustic_levels,
             });
 
-            // Embed frame → next input for backbone
-            let frame_embed = codebook.embed_frame(raw_semantic, &acoustic_levels); // [1, dim]
-            let next_input = frame_embed.unsqueeze_dim::<3>(0); // [1, 1, dim]
-
-            // Forward through backbone with cache → next hidden state
+            // Backbone forward (next hidden state)
+            let t5 = Instant::now();
+            let frame_embed = codebook.embed_frame(raw_semantic, &acoustic_levels);
+            let next_input = frame_embed.unsqueeze_dim::<3>(0);
             h = self.forward_with_cache(next_input, &mut caches);
+            backbone_ms += t5.elapsed().as_millis();
         }
+
+        let n = frames.len();
+        tracing::info!(
+            frames = n,
+            prefill_ms = prefill_ms,
+            semantic_ms = semantic_ms,
+            euler_ms = euler_ms,
+            readback_ms = readback_ms,
+            backbone_ms = backbone_ms,
+            per_frame_ms = if n > 0 {
+                (semantic_ms + euler_ms + readback_ms + backbone_ms) / n as u128
+            } else {
+                0
+            },
+            "Q4 TTS generate_async timing breakdown"
+        );
 
         Ok(frames)
     }
@@ -447,8 +467,14 @@ impl Q4FmTransformer {
         let device = h.device();
 
         let logits = self.semantic_codebook_output.forward(h);
-        let mut logits = logits.reshape([batch, self.config.semantic_output_size]);
+        let logits = logits.reshape([batch, self.config.semantic_output_size]);
 
+        logits + self.semantic_mask(device)
+    }
+
+    /// Pre-computed semantic logit mask (cached on first call via lazy evaluation).
+    /// Masks EMPTY_AUDIO (idx 0) and invalid indices >= 8194 to -inf.
+    fn semantic_mask(&self, device: WgpuDevice) -> Tensor<Wgpu, 2> {
         let mut mask_data = vec![0.0f32; self.config.semantic_output_size];
         mask_data[0] = f32::NEG_INFINITY;
         let valid_end = 2 + 8192;
@@ -456,9 +482,7 @@ impl Q4FmTransformer {
             *v = f32::NEG_INFINITY;
         }
         let mask: Tensor<Wgpu, 1> = Tensor::from_floats(mask_data.as_slice(), &device);
-        logits = logits + mask.unsqueeze_dim::<2>(0);
-
-        logits
+        mask.unsqueeze_dim::<2>(0)
     }
 
     /// Predict acoustic velocity from backbone hidden state via FM layers.
@@ -479,10 +503,14 @@ impl Q4FmTransformer {
         let device = h.device();
 
         // Project inputs to FM dim
-        let x_proj = self.input_projection.forward(x_t); // [1, 1, 3072]
+        let x_proj = self.input_projection.forward(x_t); // [B, 1, 3072]
         let t_embed = self.time_embedding.embed(t, &device); // [1, 1, 3072]
         let t_proj = self.time_projection.forward(t_embed); // [1, 1, 3072]
-        let h_proj = self.llm_projection.forward(h); // [1, 1, 3072]
+        let h_proj = self.llm_projection.forward(h); // [B, 1, 3072]
+
+        // Expand t_proj to match batch dimension (for batched CFG)
+        let [batch, _, _] = x_proj.dims();
+        let t_proj = t_proj.expand([batch, 1, self.config.dim]);
 
         // Build 3-token sequence: [x_t, t, h]
         let seq = Tensor::cat(vec![x_proj, t_proj, h_proj], 1);
@@ -507,18 +535,21 @@ impl Q4FmTransformer {
     ///
     /// Starting from Gaussian noise in R^36, performs Euler steps from
     /// t=0 (noise) to t=1 (signal) with CFG (alpha=1.2).
+    ///
+    /// Uses batched CFG: runs conditional + unconditional passes as batch=2
+    /// in a single forward pass, halving the number of GPU kernel launches.
     pub fn euler_ode_solve(&self, h: Tensor<Wgpu, 3>, noise: Tensor<Wgpu, 2>) -> Tensor<Wgpu, 2> {
         let device = h.device();
-        let n_points = self.config.euler_steps; // 8 points → 7 intervals
+        let n_points = self.config.euler_steps;
         let alpha = self.config.cfg_alpha;
 
-        // Zero hidden state for unconditional pass
+        // Pre-build batched hidden state: [2, 1, dim] = [h_cond, h_uncond=zeros]
         let [batch, seq, dim] = h.dims();
         let h_uncond: Tensor<Wgpu, 3> = Tensor::zeros([batch, seq, dim], &device);
+        let h_batched = Tensor::cat(vec![h, h_uncond], 0); // [2, 1, dim]
 
         let mut x_t = noise;
 
-        // linspace(0, 1, n_points): iterate over N-1 intervals
         for step in 0..(n_points - 1) {
             let t = step as f32 / (n_points - 1) as f32;
             let dt = 1.0 / (n_points - 1) as f32;
@@ -526,16 +557,19 @@ impl Q4FmTransformer {
             let [b, acoustic_dim] = x_t.dims();
             let x_t_3d = x_t.clone().reshape([b, 1, acoustic_dim]);
 
-            // Conditional velocity
-            let v_cond = self.predict_velocity(h.clone(), x_t_3d.clone(), t);
+            // Batch: duplicate x_t for both cond and uncond passes
+            let x_t_batched = Tensor::cat(vec![x_t_3d.clone(), x_t_3d], 0); // [2, 1, 36]
 
-            // Unconditional velocity
-            let v_uncond = self.predict_velocity(h_uncond.clone(), x_t_3d, t);
+            // Single batched forward: [2, 1, 36] → [2, 36]
+            let v_batched = self.predict_velocity(h_batched.clone(), x_t_batched, t);
+
+            // Split: v_cond = v_batched[0], v_uncond = v_batched[1]
+            let v_cond = v_batched.clone().slice([0..1, 0..acoustic_dim]);
+            let v_uncond = v_batched.slice([1..2, 0..acoustic_dim]);
 
             // CFG: v = alpha * v_cond + (1 - alpha) * v_uncond
             let v = v_cond * alpha + v_uncond * (1.0 - alpha);
 
-            // Euler step: x_{t+dt} = x_t + v * dt
             x_t = x_t + v * dt;
         }
 
