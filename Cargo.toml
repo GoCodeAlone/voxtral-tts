@@ -54,6 +54,7 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-chrome = { version = "0.7", optional = true }
+pollster = "0.4"
 num-traits = "0.2"
 num-complex = "0.4"
 byteorder = "1.5"
@@ -97,6 +98,11 @@ required-features = ["cli"]
 [[bin]]
 name = "voxtral-speak"
 path = "src/bin/speak.rs"
+required-features = ["cli", "native-tokenizer"]
+
+[[bin]]
+name = "voxtral-speak-q4"
+path = "src/bin/speak_q4.rs"
 required-features = ["cli", "native-tokenizer"]
 
 [[bin]]

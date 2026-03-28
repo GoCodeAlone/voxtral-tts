@@ -108,7 +108,10 @@ cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- \
 # Q4 quantized TTS (2.67 GB, real-time capable)
 uv run --with huggingface_hub \
   hf download TrevorJS/voxtral-tts-q4-gguf voxtral-tts-q4.gguf --local-dir models
-# (Q4 TTS CLI coming soon — currently available via Rust API and WASM)
+
+# Synthesize with Q4 (default: 4 Euler steps, use 3 for real-time)
+cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak-q4 -- \
+  --text "Hello world" --voice casual_female --euler-steps 3
 
 # List available voices
 cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- --list-voices

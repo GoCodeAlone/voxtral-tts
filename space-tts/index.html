@@ -160,15 +160,6 @@
 <script type="module">
 import { VoxtralTtsClient, samplesToWavBlob } from './tts-client.js';
 
-// Pre-tokenized lookup: we use a simple approach — send raw text to a
-// server-side tokenizer or hardcode common phrases. For the space demo,
-// we'll use a minimal JS Tekken tokenizer that maps bytes to token IDs.
-// Since tiktoken-rs is WASM-compatible, we could compile it to WASM too,
-// but for now we use pre-tokenized examples + a byte-level fallback.
-
-// Tokenization uses the WASM-compiled Tekken BPE encoder (tiktoken-rs).
-// Runs in the worker alongside the model.
-
 const client = new VoxtralTtsClient();
 const dot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
