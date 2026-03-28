@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voxtral 4B TTS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1c1c1c; color: #e0e0e0;
+      display: flex; flex-direction: column; align-items: center;
+      padding: 2rem 1rem; min-height: 100vh;
+    }
+    h1 { font-size: 1.4rem; color: #c9a0dc; margin-bottom: 0.25rem; }
+    .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
+    .card {
+      background: #262626; border-radius: 12px; padding: 1.25rem;
+      width: 100%; max-width: 540px; margin-bottom: 1rem;
+    }
+    .card-title {
+      font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;
+      color: #c9a0dc; margin-bottom: 0.75rem;
+    }
+
+    /* Status */
+    .status { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; flex-shrink: 0; }
+    .dot.ready { background: #4caf50; }
+    .dot.loading { background: #ff9800; animation: pulse 1s infinite; }
+    .dot.error { background: #f44336; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .status-text { font-size: 0.8rem; color: #aaa; }
+
+    /* Progress */
+    .progress-bar {
+      width: 100%; height: 4px; background: #333; border-radius: 2px;
+      margin-bottom: 1rem; overflow: hidden; display: none;
+    }
+    .progress-bar.active { display: block; }
+    .progress-fill { height: 100%; background: #c9a0dc; width: 0%; transition: width 0.3s; }
+
+    /* Text input */
+    textarea {
+      width: 100%; background: #333; border: 1px solid #444; border-radius: 8px;
+      color: #e0e0e0; padding: 0.75rem; font-size: 0.95rem; resize: vertical;
+      min-height: 80px; font-family: inherit;
+    }
+    textarea:focus { outline: none; border-color: #c9a0dc; }
+
+    /* Controls row */
+    .controls { display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap; align-items: center; }
+    select, button {
+      background: #333; border: 1px solid #444; border-radius: 8px;
+      color: #e0e0e0; padding: 0.5rem 0.75rem; font-size: 0.85rem; cursor: pointer;
+    }
+    select:focus, button:focus { outline: none; border-color: #c9a0dc; }
+    button:hover { background: #3a3a3a; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.primary { background: #7b2fa0; border-color: #7b2fa0; color: #fff; }
+    button.primary:hover { background: #8e3fb5; }
+    button.primary:disabled { background: #444; border-color: #444; }
+
+    /* Euler steps */
+    .param-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+    .param-label { font-size: 0.75rem; color: #888; white-space: nowrap; }
+    input[type="range"] { flex: 1; accent-color: #c9a0dc; }
+    .param-value { font-size: 0.75rem; color: #c9a0dc; min-width: 1.5rem; text-align: center; }
+
+    /* Audio output */
+    audio { width: 100%; margin-top: 0.75rem; border-radius: 8px; }
+    .audio-info { font-size: 0.75rem; color: #888; margin-top: 0.5rem; }
+
+    /* Model section */
+    .model-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .cache-info { font-size: 0.75rem; color: #666; margin-top: 0.5rem; }
+    a { color: #c9a0dc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .timing { font-size: 0.75rem; color: #888; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>Voxtral 4B TTS</h1>
+  <p class="subtitle">Text-to-speech running entirely in your browser via WebGPU</p>
+
+  <!-- Status -->
+  <div class="card">
+    <div class="status">
+      <div class="dot" id="statusDot"></div>
+      <span class="status-text" id="statusText">Checking WebGPU support...</span>
+    </div>
+    <div class="progress-bar" id="progressBar">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div class="card">
+    <div class="card-title">Text</div>
+    <textarea id="textInput" placeholder="Type something to speak..." disabled>The quick brown fox jumps over the lazy dog.</textarea>
+    <div class="controls">
+      <select id="voiceSelect" disabled>
+        <option value="casual_female">Casual Female (en)</option>
+        <option value="casual_male">Casual Male (en)</option>
+        <option value="neutral_female">Neutral Female (en)</option>
+        <option value="neutral_male">Neutral Male (en)</option>
+        <option value="cheerful_female">Cheerful Female (en)</option>
+        <option value="fr_female">French Female</option>
+        <option value="fr_male">French Male</option>
+        <option value="de_female">German Female</option>
+        <option value="de_male">German Male</option>
+        <option value="es_female">Spanish Female</option>
+        <option value="es_male">Spanish Male</option>
+        <option value="it_female">Italian Female</option>
+        <option value="it_male">Italian Male</option>
+        <option value="pt_female">Portuguese Female</option>
+        <option value="pt_male">Portuguese Male</option>
+        <option value="nl_female">Dutch Female</option>
+        <option value="nl_male">Dutch Male</option>
+        <option value="hi_female">Hindi Female</option>
+        <option value="hi_male">Hindi Male</option>
+        <option value="ar_male">Arabic Male</option>
+      </select>
+      <button class="primary" id="speakBtn" disabled>Speak</button>
+    </div>
+    <div class="param-row">
+      <span class="param-label">Euler steps</span>
+      <input type="range" id="eulerSteps" min="2" max="8" value="3" step="1">
+      <span class="param-value" id="eulerValue">3</span>
+      <span class="param-label" style="color:#666">(fewer = faster)</span>
+    </div>
+  </div>
+
+  <!-- Output -->
+  <div class="card" id="outputCard" style="display:none">
+    <div class="card-title">Output</div>
+    <audio id="audioPlayer" controls></audio>
+    <div class="audio-info" id="audioInfo"></div>
+    <div class="timing" id="timingInfo"></div>
+    <button id="downloadBtn" style="margin-top:0.5rem">Download WAV</button>
+  </div>
+
+  <!-- Model -->
+  <div class="card">
+    <div class="card-title">Model</div>
+    <div class="model-actions">
+      <button id="loadBtn">Load Model (~2.7 GB)</button>
+      <button id="clearCacheBtn">Clear Cache</button>
+    </div>
+    <div class="cache-info" id="cacheInfo"></div>
+    <p class="cache-info" style="margin-top:0.5rem">
+      Q4 GGUF weights from
+      <a href="https://huggingface.co/TrevorJS/voxtral-tts-q4-gguf" target="_blank">TrevorJS/voxtral-tts-q4-gguf</a>.
+      Voices from
+      <a href="https://huggingface.co/mistralai/Voxtral-4B-TTS-2603" target="_blank">mistralai/Voxtral-4B-TTS-2603</a>.
+    </p>
+  </div>
+
+<script type="module">
+import { VoxtralTtsClient, samplesToWavBlob } from './tts-client.js';
+
+// Pre-tokenized lookup: we use a simple approach — send raw text to a
+// server-side tokenizer or hardcode common phrases. For the space demo,
+// we'll use a minimal JS Tekken tokenizer that maps bytes to token IDs.
+// Since tiktoken-rs is WASM-compatible, we could compile it to WASM too,
+// but for now we use pre-tokenized examples + a byte-level fallback.
+
+// Tokenization uses the WASM-compiled Tekken BPE encoder (tiktoken-rs).
+// Runs in the worker alongside the model.
+
+const client = new VoxtralTtsClient();
+const dot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const progressBar = document.getElementById('progressBar');
+const progressFill = document.getElementById('progressFill');
+const textInput = document.getElementById('textInput');
+const voiceSelect = document.getElementById('voiceSelect');
+const speakBtn = document.getElementById('speakBtn');
+const loadBtn = document.getElementById('loadBtn');
+const clearCacheBtn = document.getElementById('clearCacheBtn');
+const cacheInfo = document.getElementById('cacheInfo');
+const outputCard = document.getElementById('outputCard');
+const audioPlayer = document.getElementById('audioPlayer');
+const audioInfo = document.getElementById('audioInfo');
+const timingInfo = document.getElementById('timingInfo');
+const downloadBtn = document.getElementById('downloadBtn');
+const eulerSteps = document.getElementById('eulerSteps');
+const eulerValue = document.getElementById('eulerValue');
+
+let lastWavBlob = null;
+let modelLoaded = false;
+let currentVoice = null;
+
+eulerSteps.addEventListener('input', () => {
+    eulerValue.textContent = eulerSteps.value;
+});
+
+function setStatus(state, text) {
+    dot.className = 'dot ' + state;
+    statusText.textContent = text;
+}
+
+function showProgress(stage, percent) {
+    progressBar.classList.add('active');
+    if (percent != null) progressFill.style.width = percent + '%';
+    setStatus('loading', stage);
+}
+
+function hideProgress() {
+    progressBar.classList.remove('active');
+    progressFill.style.width = '0%';
+}
+
+client.onProgress = (stage, percent) => showProgress(stage, percent);
+client.onError = (msg) => { hideProgress(); setStatus('error', msg); };
+
+// Init
+(async () => {
+    try {
+        if (!navigator.gpu) {
+            setStatus('error', 'WebGPU not supported in this browser');
+            return;
+        }
+
+        setStatus('loading', 'Initializing WebGPU...');
+        await client.init();
+        setStatus('ready', 'Ready — load model to begin');
+        loadBtn.disabled = false;
+
+        // Check cache
+        const cache = await client.checkCache();
+        if (cache.cached) {
+            cacheInfo.textContent = `${cache.shardsCached}/${cache.shardsTotal} shards cached`;
+        } else if (cache.shardsCached > 0) {
+            cacheInfo.textContent = `${cache.shardsCached}/${cache.shardsTotal} shards cached`;
+        }
+    } catch (e) {
+        setStatus('error', 'Failed to init: ' + e.message);
+    }
+})();
+
+loadBtn.addEventListener('click', async () => {
+    loadBtn.disabled = true;
+    try {
+        await client.loadFromServer();
+        hideProgress();
+        setStatus('ready', 'Model loaded — choose a voice and speak');
+        modelLoaded = true;
+        textInput.disabled = false;
+        voiceSelect.disabled = false;
+        speakBtn.disabled = false;
+
+        const cache = await client.checkCache();
+        cacheInfo.textContent = `${cache.shardsCached}/${cache.shardsTotal} shards cached`;
+    } catch (e) {
+        hideProgress();
+        setStatus('error', 'Load failed: ' + e.message);
+        loadBtn.disabled = false;
+    }
+});
+
+clearCacheBtn.addEventListener('click', async () => {
+    await client.clearCache();
+    cacheInfo.textContent = 'Cache cleared';
+});
+
+speakBtn.addEventListener('click', async () => {
+    const text = textInput.value.trim();
+    if (!text) return;
+
+    speakBtn.disabled = true;
+    const voice = voiceSelect.value;
+
+    try {
+        // Load voice if changed
+        if (voice !== currentVoice) {
+            showProgress(`Loading voice "${voice}"...`, null);
+            await client.loadVoice(voice);
+            currentVoice = voice;
+        }
+
+        // Tokenize via WASM Tekken BPE
+        const tokenIds = await client.tokenize(text);
+
+        // Synthesize
+        const steps = parseInt(eulerSteps.value);
+        // max_frames roughly: more text = more frames needed
+        const maxFrames = Math.min(2000, Math.max(50, tokenIds.length * 30));
+
+        showProgress('Synthesizing...', null);
+        const t0 = performance.now();
+        const { samples, sampleRate } = await client.synthesize(tokenIds, maxFrames);
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+        const duration = (samples.length / sampleRate).toFixed(2);
+        const rtf = (parseFloat(elapsed) / parseFloat(duration)).toFixed(1);
+
+        hideProgress();
+        setStatus('ready', 'Done — play or download the audio');
+
+        // Create WAV and play
+        lastWavBlob = samplesToWavBlob(samples, sampleRate);
+        const url = URL.createObjectURL(lastWavBlob);
+        audioPlayer.src = url;
+        outputCard.style.display = 'block';
+        audioInfo.textContent = `${duration}s @ ${sampleRate / 1000} kHz · ${samples.length.toLocaleString()} samples`;
+        timingInfo.textContent = `Generated in ${elapsed}s · RTF ${rtf}x`;
+    } catch (e) {
+        hideProgress();
+        setStatus('error', 'Synthesis failed: ' + e.message);
+    } finally {
+        speakBtn.disabled = !modelLoaded;
+    }
+});
+
+downloadBtn.addEventListener('click', () => {
+    if (!lastWavBlob) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(lastWavBlob);
+    a.download = 'voxtral-tts-output.wav';
+    a.click();
+});
+</script>
+</body>
+</html>

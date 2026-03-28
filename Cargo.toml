@@ -18,6 +18,7 @@ native-tokenizer = ["tiktoken-rs"]
 wasm = [
     "wgpu",
     "dep:wgpu",
+    "native-tokenizer",
     "wasm-bindgen",
     "wasm-bindgen-futures",
     "js-sys",

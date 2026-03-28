@@ -432,6 +432,36 @@ impl Default for VoxtralQ4 {
 }
 
 // ---------------------------------------------------------------------------
+// Tekken tokenizer for browser TTS
+// ---------------------------------------------------------------------------
+
+use crate::tokenizer::TekkenEncoder;
+
+/// Tekken BPE tokenizer for browser use.
+///
+/// Loads from a tekken.json string and encodes text to token IDs.
+#[cfg_attr(target_family = "wasm", wasm_bindgen)]
+pub struct TekkenTokenizerWasm {
+    encoder: TekkenEncoder,
+}
+
+#[cfg_attr(target_family = "wasm", wasm_bindgen)]
+impl TekkenTokenizerWasm {
+    /// Load tokenizer from a JSON string (fetched from HuggingFace).
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(constructor))]
+    pub fn new(json: &str) -> Result<TekkenTokenizerWasm, String> {
+        let encoder =
+            TekkenEncoder::from_json(json).map_err(|e| format!("Failed to load tokenizer: {e}"))?;
+        Ok(Self { encoder })
+    }
+
+    /// Encode text to token IDs (Uint32Array).
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        self.encoder.encode(text)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VoxtralTts — Q4 TTS pipeline for browser
 // ---------------------------------------------------------------------------
 

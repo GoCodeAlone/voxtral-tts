@@ -1,0 +1,24 @@
+{
+  "name": "voxtral-mini-realtime",
+  "type": "module",
+  "collaborators": [
+    "Trevor Strieber"
+  ],
+  "description": "Voxtral Mini 4B Realtime - Streaming ASR in Rust with Burn",
+  "version": "0.2.1",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TrevorS/voxtral-mini-realtime-rs"
+  },
+  "files": [
+    "voxtral_mini_realtime_bg.wasm",
+    "voxtral_mini_realtime.js",
+    "voxtral_mini_realtime.d.ts"
+  ],
+  "main": "voxtral_mini_realtime.js",
+  "types": "voxtral_mini_realtime.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
