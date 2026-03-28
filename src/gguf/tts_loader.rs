@@ -66,6 +66,7 @@ impl Q4TtsModelParts {
             cpu_bytes: self.tok_embed_q4_bytes,
         };
 
+        #[allow(unused_mut)]
         let mut backbone = Q4TtsBackbone::new(
             self.backbone_layers,
             self.backbone_norm,
