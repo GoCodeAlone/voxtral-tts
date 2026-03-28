@@ -143,7 +143,7 @@ impl<R: Read + Seek> GgufReader<R> {
             let value_type = reader
                 .read_u32::<LittleEndian>()
                 .with_context(|| format!("Failed to read metadata value type {i}"))?;
-            skip_gguf_value(&mut reader, value_type)
+            skip_gguf_value(&mut reader, value_type, 0)
                 .with_context(|| format!("Failed to skip metadata value {i}"))?;
         }
 
@@ -351,7 +351,13 @@ fn read_gguf_string<R: Read>(reader: &mut R) -> Result<String> {
     String::from_utf8(buf).context("Invalid UTF-8 in GGUF string")
 }
 
-fn skip_gguf_value<R: Read + Seek>(reader: &mut R, value_type: u32) -> Result<()> {
+const MAX_ARRAY_DEPTH: usize = 4;
+const MAX_ARRAY_COUNT: u64 = 1_000_000;
+
+fn skip_gguf_value<R: Read + Seek>(reader: &mut R, value_type: u32, depth: usize) -> Result<()> {
+    if depth > MAX_ARRAY_DEPTH {
+        bail!("GGUF metadata array nesting exceeds maximum depth ({MAX_ARRAY_DEPTH})");
+    }
     match value_type {
         0 => {
             reader.read_u8()?;
@@ -384,8 +390,11 @@ fn skip_gguf_value<R: Read + Seek>(reader: &mut R, value_type: u32) -> Result<()
             // array
             let elem_type = reader.read_u32::<LittleEndian>()?;
             let count = reader.read_u64::<LittleEndian>()?;
+            if count > MAX_ARRAY_COUNT {
+                bail!("GGUF metadata array count {count} exceeds maximum ({MAX_ARRAY_COUNT})");
+            }
             for _ in 0..count {
-                skip_gguf_value(reader, elem_type)?;
+                skip_gguf_value(reader, elem_type, depth + 1)?;
             }
         }
         10 => {
