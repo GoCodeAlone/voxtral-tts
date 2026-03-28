@@ -1,7 +1,9 @@
 # Voxtral Mini 4B Realtime (Rust)
 
-[![HuggingFace](https://img.shields.io/badge/%F0%9F%A4%97-Model_on_HuggingFace-yellow)](https://huggingface.co/TrevorJS/voxtral-mini-realtime-gguf)
-[![Live Demo](https://img.shields.io/badge/%F0%9F%94%8A-Live_Demo-blue)](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime)
+[![HuggingFace ASR](https://img.shields.io/badge/%F0%9F%A4%97-ASR_Model-yellow)](https://huggingface.co/TrevorJS/voxtral-mini-realtime-gguf)
+[![HuggingFace TTS](https://img.shields.io/badge/%F0%9F%A4%97-TTS_Model-yellow)](https://huggingface.co/TrevorJS/voxtral-tts-q4-gguf)
+[![ASR Demo](https://img.shields.io/badge/%F0%9F%8E%99%EF%B8%8F-ASR_Demo-blue)](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime)
+[![TTS Demo](https://img.shields.io/badge/%F0%9F%94%8A-TTS_Demo-purple)](https://huggingface.co/spaces/TrevorJS/voxtral-4b-tts)
 
 Streaming speech recognition and text-to-speech running natively and in the browser. A pure Rust implementation of Mistral's [Voxtral Mini 4B Realtime](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) (ASR) and [Voxtral 4B TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) models using the [Burn](https://burn.dev) ML framework.
 
@@ -45,7 +47,7 @@ NVIDIA DGX Spark (GB10, LPDDR5x).
 - Dual-path kernel dispatch: shared-memory tiled kernel for single-token decode, naive kernel for multi-row encode/prefill
 - Q4 GGUF (2.5 GB ASR, 2.67 GB TTS) runs entirely client-side in a browser tab via WASM + WebGPU
 
-[Try the ASR demo live.](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime)
+Try the demos: [ASR (speech-to-text)](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime) | [TTS (text-to-speech)](https://huggingface.co/spaces/TrevorJS/voxtral-4b-tts)
 
 ## Quick Start
 
@@ -86,7 +88,7 @@ bun serve.mjs
 
 Open `https://localhost:8443`, accept the certificate, and click **Load from Server** to download the model shards. Record from your microphone or upload a WAV file to transcribe.
 
-[Hosted demo on HuggingFace Spaces](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime) if you want to skip local setup.
+Hosted demos: [ASR on HuggingFace Spaces](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime) | [TTS on HuggingFace Spaces](https://huggingface.co/spaces/TrevorJS/voxtral-4b-tts)
 
 ### Text-to-Speech
 
@@ -104,8 +106,8 @@ cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- \
   --text "Hello world" --voice casual_female --output hello.wav --euler-steps 3
 
 # Q4 quantized TTS (2.67 GB, real-time capable)
-uv run --with huggingface_hub hf download TrevorJS/voxtral-mini-realtime-gguf \
-  voxtral-tts-q4.gguf --local-dir models
+uv run --with huggingface_hub \
+  hf download TrevorJS/voxtral-tts-q4-gguf voxtral-tts-q4.gguf --local-dir models
 # (Q4 TTS CLI coming soon — currently available via Rust API and WASM)
 
 # List available voices

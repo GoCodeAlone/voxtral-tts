@@ -13,8 +13,8 @@
 import init, { VoxtralTts, TekkenTokenizerWasm, initWgpuDevice } from './pkg/voxtral_mini_realtime.js';
 
 const HF_MODEL = "https://huggingface.co/TrevorJS/voxtral-tts-q4-gguf/resolve/main";
-const HF_VOICES = "https://huggingface.co/mistralai/Voxtral-4B-TTS-2603/resolve/main/voice_embedding";
-const HF_TOKENIZER = "https://huggingface.co/mistralai/Voxtral-4B-TTS-2603/resolve/main/tekken.json";
+const HF_VOICES = "https://huggingface.co/TrevorJS/voxtral-tts-q4-gguf/resolve/main/voice_embedding";
+const HF_TOKENIZER = "https://huggingface.co/TrevorJS/voxtral-tts-q4-gguf/resolve/main/tekken.json";
 const SHARD_NAMES = ["shard-aa", "shard-ab", "shard-ac", "shard-ad", "shard-ae", "shard-af"];
 const CACHE_NAME = "voxtral-tts-weights-v1";
 
