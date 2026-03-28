@@ -1,0 +1,38 @@
+[package]
+name = "voxtral-mini-realtime-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+half = "2"
+
+[dependencies.voxtral-mini-realtime]
+path = ".."
+features = ["wgpu"]
+
+[[bin]]
+name = "fuzz_gguf_reader"
+path = "fuzz_targets/fuzz_gguf_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sharded_cursor"
+path = "fuzz_targets/fuzz_sharded_cursor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_q4_roundtrip"
+path = "fuzz_targets/fuzz_q4_roundtrip.rs"
+test = false
+doc = false
+bench = false

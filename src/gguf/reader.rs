@@ -119,13 +119,22 @@ impl<R: Read + Seek> GgufReader<R> {
             bail!("Unsupported GGUF version: {version} (expected 2 or 3)");
         }
 
-        // Counts
+        // Counts (capped to prevent OOM/DoS from malformed files)
+        const MAX_TENSORS: u64 = 100_000;
+        const MAX_METADATA: u64 = 100_000;
+
         let tensor_count = reader
             .read_u64::<LittleEndian>()
             .context("Failed to read tensor count")?;
+        if tensor_count > MAX_TENSORS {
+            bail!("Tensor count {tensor_count} exceeds maximum ({MAX_TENSORS})");
+        }
         let metadata_kv_count = reader
             .read_u64::<LittleEndian>()
             .context("Failed to read metadata KV count")?;
+        if metadata_kv_count > MAX_METADATA {
+            bail!("Metadata KV count {metadata_kv_count} exceeds maximum ({MAX_METADATA})");
+        }
 
         // Skip metadata key-value pairs
         for i in 0..metadata_kv_count {
@@ -146,6 +155,9 @@ impl<R: Read + Seek> GgufReader<R> {
             let ndims = reader
                 .read_u32::<LittleEndian>()
                 .with_context(|| format!("Failed to read ndims for tensor {i}"))?;
+            if ndims > 8 {
+                bail!("Tensor {i} has {ndims} dimensions (max 8)");
+            }
             let mut dimensions = Vec::with_capacity(ndims as usize);
             for d in 0..ndims {
                 dimensions.push(
@@ -207,6 +219,9 @@ impl<R: Read + Seek> GgufReader<R> {
         self.tensors.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Maximum tensor data size to allocate (8 GB — largest reasonable model tensor).
+    const MAX_TENSOR_BYTES: usize = 8 * 1024 * 1024 * 1024;
+
     /// Read raw tensor data bytes from the file.
     pub fn tensor_data(&mut self, name: &str) -> Result<Vec<u8>> {
         let info = self
@@ -215,6 +230,12 @@ impl<R: Read + Seek> GgufReader<R> {
             .with_context(|| format!("Tensor '{name}' not found in GGUF"))?
             .clone();
         let byte_size = info.byte_size() as usize;
+        if byte_size > Self::MAX_TENSOR_BYTES {
+            bail!(
+                "Tensor '{name}' byte size {byte_size} exceeds maximum ({})",
+                Self::MAX_TENSOR_BYTES
+            );
+        }
         let abs_offset = self.data_section_offset + info.offset;
         self.reader.seek(SeekFrom::Start(abs_offset))?;
         let mut buf = vec![0u8; byte_size];
@@ -317,8 +338,14 @@ impl Seek for ShardedCursor {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Maximum string length to prevent OOM from malformed GGUF files.
+const MAX_STRING_LEN: usize = 256 * 1024; // 256 KB
+
 fn read_gguf_string<R: Read>(reader: &mut R) -> Result<String> {
     let len = reader.read_u64::<LittleEndian>()? as usize;
+    if len > MAX_STRING_LEN {
+        bail!("GGUF string length {len} exceeds maximum ({MAX_STRING_LEN})");
+    }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     String::from_utf8(buf).context("Invalid UTF-8 in GGUF string")
