@@ -7,7 +7,11 @@ Streaming speech recognition and text-to-speech running natively and in the brow
 
 ## Benchmarks
 
-NVIDIA DGX Spark (GB10, LPDDR5x), 16s test audio, 3-run average:
+NVIDIA DGX Spark (GB10, LPDDR5x).
+
+### ASR (Speech Recognition)
+
+16s test audio, 3-run average:
 
 | Path | Encode | Decode | Total | RTF | Tok/s | Memory |
 |------|--------|--------|-------|-----|-------|--------|
@@ -15,13 +19,33 @@ NVIDIA DGX Spark (GB10, LPDDR5x), 16s test audio, 3-run average:
 | BF16 native | 887 ms | 23689 ms | 24607 ms | 1.543 | 4.6 | 9.2 GB |
 | Q4 GGUF WASM | — | — | ~225 s | ~14.1 | ~0.5 | (browser) |
 
-- **RTF** (Real-Time Factor): 0.416 means transcription completes in under half the audio duration
-- Q4 decode is **4.2× faster** than F32 — fused dequant+matmul avoids materializing 9 GB of weights
-- Custom WGSL compute shaders with vectorized u32 reads and vec4 dot products
-- Dual-path kernel dispatch: shared-memory tiled kernel for single-token decode, naive kernel for multi-row encode/prefill
 - **8.49% WER** on FLEURS English (647 utterances), vs. Mistral's reported 4.90% at f32
 
-The Q4 GGUF quantized path (2.5 GB) runs entirely client-side in a browser tab via WASM + WebGPU. [Try it live.](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime)
+### TTS (Text-to-Speech)
+
+"The quick brown fox jumps over the lazy dog" (9 tokens), casual_female voice:
+
+| Path | Euler Steps | Gen Time | Audio | RTF | Model Size |
+|------|-------------|----------|-------|-----|------------|
+| **Q4 GGUF native** | 3 | 3.7s | 3.84s | **0.97** | 2.67 GB |
+| Q4 GGUF native | 4 | 5.0s | 4.96s | 1.01 | 2.67 GB |
+| BF16 native | 3 | 10.4s | 2.72s | 3.82 | ~8 GB |
+| BF16 native | 8 | 20.6s | 2.96s | 6.97 | ~8 GB |
+| Q4 GGUF WASM | 8 | 367s | 3.52s | 104 | 2.67 GB |
+
+- **RTF** < 1.0 means faster-than-real-time synthesis
+- Q4 at 3 Euler steps achieves **real-time** with perfect Whisper large-v3 transcription
+- Optimizations: batched CFG (2× → batch=2), fused QKV+gate/up projections, pre-allocated KV cache
+- Q4 model load: 3.9s native, 9.2s WASM (including shard download over localhost)
+- 20 preset voices across 9 languages. Use `--euler-steps` to tune speed/quality tradeoff
+
+### Architecture Notes
+
+- Custom WGSL compute shaders with vectorized u32 reads and vec4 dot products
+- Dual-path kernel dispatch: shared-memory tiled kernel for single-token decode, naive kernel for multi-row encode/prefill
+- Q4 GGUF (2.5 GB ASR, 2.67 GB TTS) runs entirely client-side in a browser tab via WASM + WebGPU
+
+[Try the ASR demo live.](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime)
 
 ## Quick Start
 
@@ -75,9 +99,14 @@ uv run --with huggingface_hub \
 cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- \
   --text "Hello world" --voice casual_female --output hello.wav
 
-# Control generation length (default: 2000 frames)
+# Faster synthesis with fewer Euler steps (3 = real-time on GPU)
 cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- \
-  --text "Short." --voice alloy --max-frames 500
+  --text "Hello world" --voice casual_female --output hello.wav --euler-steps 3
+
+# Q4 quantized TTS (2.67 GB, real-time capable)
+uv run --with huggingface_hub hf download TrevorJS/voxtral-mini-realtime-gguf \
+  voxtral-tts-q4.gguf --local-dir models
+# (Q4 TTS CLI coming soon — currently available via Rust API and WASM)
 
 # List available voices
 cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- --list-voices
@@ -165,13 +194,19 @@ GPU-dependent tests (model layer shapes, Q4 matmul, WGSL shader correctness) are
 
 ### Q4 GGUF Sharding (for browser)
 
-The GGUF file must be split into shards of 512 MB or less to stay under the browser's `ArrayBuffer` limit:
+GGUF files must be split into shards of 512 MB or less to stay under the browser's `ArrayBuffer` limit:
 
 ```bash
+# ASR shards
 split -b 512m models/voxtral-q4.gguf models/voxtral-q4-shards/shard-
+
+# TTS shards (quantize first, then shard)
+uv run --with safetensors --with torch --with numpy --with packaging \
+  scripts/quantize_tts_gguf.py models/voxtral-tts/ -o models/voxtral-tts-q4.gguf
+split -b 512m models/voxtral-tts-q4.gguf models/voxtral-tts-q4-shards/shard-
 ```
 
-The dev server and E2E test discover shards automatically from `models/voxtral-q4-shards/`.
+The dev server discovers shards from `models/voxtral-q4-shards/` (ASR) and `models/voxtral-tts-q4-shards/` (TTS).
 
 ## Project Structure
 
