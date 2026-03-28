@@ -54,21 +54,17 @@ Try the demos: [ASR (speech-to-text)](https://huggingface.co/spaces/TrevorJS/vox
 ### Native CLI
 
 ```bash
-# Download model weights (~9 GB)
+# Download ASR model weights (~9 GB BF16 or ~2.5 GB Q4)
 uv run --with huggingface_hub \
   hf download mistralai/Voxtral-Mini-4B-Realtime-2602 --local-dir models/voxtral
+uv run --with huggingface_hub \
+  hf download TrevorJS/voxtral-mini-realtime-gguf --local-dir models/
 
-# Transcribe an audio file (BF16 SafeTensors path)
-cargo run --release --features "wgpu,cli,hub" --bin voxtral-transcribe -- \
-  --audio audio.wav --model models/voxtral
-
-# To run gguf quantized models,
-# download the models ~2.5GB
-uv run --with huggingface_hub hf download TrevorJS/voxtral-mini-realtime-gguf --local-dir models/
-
-# To transcribe the audio file
-cargo run --release --features "wgpu,cli,hub" --bin voxtral-transcribe -- \
-  --audio audio.wav --gguf models/voxtral-q4.gguf --tokenizer models/tekken.json
+# Transcribe audio (BF16 or Q4)
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
+  transcribe --audio audio.wav --model models/voxtral
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
+  transcribe --audio audio.wav --gguf models/voxtral-q4.gguf
 ```
 
 ### Browser Demo
@@ -93,28 +89,24 @@ Hosted demos: [ASR on HuggingFace Spaces](https://huggingface.co/spaces/TrevorJS
 ### Text-to-Speech
 
 ```bash
-# Download TTS model weights (~8 GB)
+# Download TTS model weights (~8 GB BF16 or ~2.67 GB Q4)
 uv run --with huggingface_hub \
   hf download mistralai/Voxtral-4B-TTS-2603 --local-dir models/voxtral-tts
-
-# Synthesize speech
-cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- \
-  --text "Hello world" --voice casual_female --output hello.wav
-
-# Faster synthesis with fewer Euler steps (3 = real-time on GPU)
-cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- \
-  --text "Hello world" --voice casual_female --output hello.wav --euler-steps 3
-
-# Q4 quantized TTS (2.67 GB, real-time capable)
 uv run --with huggingface_hub \
   hf download TrevorJS/voxtral-tts-q4-gguf voxtral-tts-q4.gguf --local-dir models
 
-# Synthesize with Q4 (default: 4 Euler steps, use 3 for real-time)
-cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak-q4 -- \
-  --text "Hello world" --voice casual_female --euler-steps 3
+# Synthesize speech (BF16 or Q4)
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
+  speak --text "Hello world" --voice casual_female
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
+  speak --text "Hello world" --voice casual_female --gguf models/voxtral-tts-q4.gguf
+
+# Real-time with 3 Euler steps
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
+  speak --text "Hello world" --gguf models/voxtral-tts-q4.gguf --euler-steps 3
 
 # List available voices
-cargo run --release --features "wgpu,cli,hub" --bin voxtral-speak -- --list-voices
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- speak --list-voices
 ```
 
 20 preset voices across 9 languages. The TTS pipeline runs backbone (Ministral 3B) autoregressive decoding, flow-matching acoustic prediction, and codec synthesis to produce 24 kHz audio.

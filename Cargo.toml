@@ -91,18 +91,8 @@ tempfile = "3.24"
 pollster = "0.4.0"
 
 [[bin]]
-name = "voxtral-transcribe"
-path = "src/bin/transcribe.rs"
-required-features = ["cli"]
-
-[[bin]]
-name = "voxtral-speak"
-path = "src/bin/speak.rs"
-required-features = ["cli", "native-tokenizer"]
-
-[[bin]]
-name = "voxtral-speak-q4"
-path = "src/bin/speak_q4.rs"
+name = "voxtral"
+path = "src/bin/voxtral/main.rs"
 required-features = ["cli", "native-tokenizer"]
 
 [[bin]]

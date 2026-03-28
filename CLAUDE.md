@@ -46,15 +46,16 @@ cargo run --features "wgpu,cli,hub" --bin e2e-bench -- \
 bunx playwright test tests/e2e_browser.spec.ts
 
 # CLI ASR inference
-cargo run --features "wgpu,cli,hub" --bin voxtral-transcribe -- \
-  --audio test_data/mary_had_lamb.wav \
-  --gguf models/voxtral-q4.gguf \
-  --tokenizer models/voxtral/tekken.json
+cargo run --features "wgpu,cli,hub" --bin voxtral -- \
+  transcribe --audio test_data/mary_had_lamb.wav --gguf models/voxtral-q4.gguf
 
-# CLI TTS inference
-cargo run --features "wgpu,cli,hub" --bin voxtral-speak -- \
-  --text "Hello world" --voice casual_female --output hello.wav \
-  --max-frames 2000
+# CLI TTS inference (BF16)
+cargo run --features "wgpu,cli,hub" --bin voxtral -- \
+  speak --text "Hello world" --voice casual_female
+
+# CLI TTS inference (Q4, real-time)
+cargo run --features "wgpu,cli,hub" --bin voxtral -- \
+  speak --text "Hello world" --gguf models/voxtral-tts-q4.gguf --euler-steps 3
 
 # Dev HTTPS server for browser testing
 bun serve.mjs

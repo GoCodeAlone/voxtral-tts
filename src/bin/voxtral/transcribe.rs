@@ -1,4 +1,4 @@
-//! CLI for Voxtral transcription (f32 SafeTensors or Q4 GGUF).
+//! `voxtral transcribe` subcommand — speech-to-text.
 
 use anyhow::{bail, Context, Result};
 use burn::backend::Wgpu;
@@ -25,49 +25,45 @@ use voxtral_mini_realtime::tokenizer::VoxtralTokenizer;
 type Backend = Wgpu;
 
 #[derive(Parser)]
-#[command(name = "voxtral-transcribe")]
-#[command(about = "Transcribe audio using Voxtral Mini 4B Realtime")]
-struct Cli {
-    /// Path to audio file (WAV format). Can be specified multiple times for batch processing.
+pub struct Args {
+    /// Audio file(s) to transcribe (WAV format).
     #[arg(short, long, required_unless_present = "audio_list")]
     audio: Vec<String>,
 
-    /// File containing audio paths (one per line). Loads model once, processes all files.
+    /// File containing audio paths (one per line).
     #[arg(long, conflicts_with = "audio")]
     audio_list: Option<String>,
 
-    /// Path to f32 model directory (containing consolidated.safetensors and tekken.json)
+    /// BF16 SafeTensors model directory.
     #[arg(short, long, default_value = "models/voxtral", conflicts_with = "gguf")]
     model: String,
 
-    /// Path to Q4 GGUF model file (use instead of --model for quantized inference)
-    #[arg(long, conflicts_with = "model", requires = "tokenizer")]
+    /// Q4 GGUF model file (use instead of --model for quantized inference).
+    #[arg(long, conflicts_with = "model")]
     gguf: Option<String>,
 
-    /// Path to tokenizer JSON (defaults to <model>/tekken.json)
+    /// Tekken tokenizer JSON (auto-discovered from model dir).
     #[arg(long)]
     tokenizer: Option<String>,
 
-    /// Delay in tokens (1 token = 80ms)
+    /// Streaming lookahead in tokens (1 token = 80ms).
     #[arg(short, long, default_value = "6")]
     delay: usize,
 
-    /// Max mel frames per chunk (lower values avoid GPU shared-memory limits on Apple GPUs)
+    /// Max mel frames per chunk.
     #[arg(long, default_value_t = 1200)]
     max_mel_frames: usize,
 }
 
-fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
-
-    let cli = Cli::parse();
+pub fn run(args: Args) -> Result<()> {
     let device = Default::default();
 
-    // Collect audio paths from --audio args or --audio-list file
-    let audio_paths: Vec<String> = if let Some(list_path) = &cli.audio_list {
+    if args.max_mel_frames == 0 {
+        bail!("--max-mel-frames must be greater than 0");
+    }
+
+    // Collect audio paths
+    let audio_paths: Vec<String> = if let Some(list_path) = &args.audio_list {
         std::fs::read_to_string(list_path)
             .with_context(|| format!("Failed to read audio list: {list_path}"))?
             .lines()
@@ -75,21 +71,32 @@ fn main() -> Result<()> {
             .map(|l| l.trim().to_string())
             .collect()
     } else {
-        cli.audio.clone()
+        args.audio.clone()
     };
 
     if audio_paths.is_empty() {
         bail!("No audio files specified");
     }
 
-    if cli.max_mel_frames == 0 {
-        bail!("--max-mel-frames must be greater than 0");
-    }
-
-    // Resolve tokenizer path
-    let tokenizer_path = match &cli.tokenizer {
+    // Resolve tokenizer
+    let tokenizer_path = match &args.tokenizer {
         Some(p) => PathBuf::from(p),
-        None => PathBuf::from(&cli.model).join("tekken.json"),
+        None => {
+            if args.gguf.is_some() {
+                // Q4 path: try common locations
+                let candidates = [
+                    PathBuf::from("models/voxtral/tekken.json"),
+                    PathBuf::from("models/tekken.json"),
+                ];
+                candidates.into_iter().find(|p| p.exists()).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Tokenizer not found. Provide --tokenizer or place tekken.json in models/"
+                    )
+                })?
+            } else {
+                PathBuf::from(&args.model).join("tekken.json")
+            }
+        }
     };
     if !tokenizer_path.exists() {
         bail!("Tokenizer not found at {}", tokenizer_path.display());
@@ -102,15 +109,13 @@ fn main() -> Result<()> {
     let mel_extractor = MelSpectrogram::new(MelConfig::voxtral());
     let pad_config = PadConfig::voxtral();
     let time_embed = TimeEmbedding::new(3072);
-    let t_embed = time_embed.embed::<Backend>(cli.delay as f32, &device);
+    let t_embed = time_embed.embed::<Backend>(args.delay as f32, &device);
 
-    // Load model once
-    let model_state = load_model(&cli, &device)?;
-
-    let chunk_config = ChunkConfig::voxtral().with_max_frames(cli.max_mel_frames);
+    let model_state = load_model(&args, &device)?;
+    let chunk_config = ChunkConfig::voxtral().with_max_frames(args.max_mel_frames);
 
     for audio_path in &audio_paths {
-        let text = run_with_chunk_hint(cli.max_mel_frames, || {
+        let text = run_with_chunk_hint(args.max_mel_frames, || {
             transcribe_one(
                 audio_path,
                 &model_state,
@@ -127,7 +132,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Loaded model — either f32 or Q4.
 #[allow(clippy::large_enum_variant)]
 enum ModelState {
     F32 {
@@ -139,17 +143,17 @@ enum ModelState {
 }
 
 fn load_model(
-    cli: &Cli,
+    args: &Args,
     device: &<Backend as burn::tensor::backend::Backend>::Device,
 ) -> Result<ModelState> {
-    if let Some(gguf_path) = &cli.gguf {
+    if let Some(gguf_path) = &args.gguf {
         use voxtral_mini_realtime::gguf::loader::Q4ModelLoader;
         let path = PathBuf::from(gguf_path);
         if !path.exists() {
             bail!("GGUF model not found at {}", path.display());
         }
         let start = Instant::now();
-        info!("Loading Q4 GGUF model");
+        info!("Loading Q4 GGUF model from {}", path.display());
         let mut loader = Q4ModelLoader::from_file(&path).context("Failed to open GGUF")?;
         let model = loader.load(device).context("Failed to load Q4 model")?;
         info!(
@@ -159,30 +163,28 @@ fn load_model(
         Ok(ModelState::Q4 { model })
     } else {
         use voxtral_mini_realtime::models::loader::VoxtralModelLoader;
-        let model_dir = PathBuf::from(&cli.model);
+        let model_dir = PathBuf::from(&args.model);
         let safetensors_path = model_dir.join("consolidated.safetensors");
         if !safetensors_path.exists() {
             bail!(
-                "Model not found at {}\nRun: hf download mistralai/Voxtral-Mini-4B-Realtime-2602 --local-dir {}",
+                "Model not found at {}\nDownload: hf download mistralai/Voxtral-Mini-4B-Realtime-2602 --local-dir {}",
                 safetensors_path.display(),
                 model_dir.display()
             );
         }
         let start = Instant::now();
-        info!("Loading f32 model");
+        info!("Loading BF16 model from {}", model_dir.display());
         let loader = VoxtralModelLoader::from_file(&safetensors_path)
             .context("Failed to open model weights")?;
         let model = loader.load(device).context("Failed to load model")?;
         info!(
             elapsed_ms = start.elapsed().as_millis() as u64,
-            "f32 model loaded"
+            "BF16 model loaded"
         );
         Ok(ModelState::F32 { model })
     }
 }
 
-/// Preprocess one audio file and run inference against the already-loaded model.
-/// Long audio is automatically split into chunks to stay within GPU limits.
 #[allow(clippy::too_many_arguments)]
 fn transcribe_one(
     audio_path: &str,
@@ -205,14 +207,14 @@ fn transcribe_one(
         audio
     };
     audio.peak_normalize(0.95);
-    let sample_rate = audio.sample_rate; // always 16000 after resampling
+    let sample_rate = audio.sample_rate;
 
     let chunks = if needs_chunking(audio.samples.len(), chunk_config) {
         let chunks = chunk_audio(&audio.samples, chunk_config);
         info!(
             total_chunks = chunks.len(),
             max_mel_frames = chunk_config.max_mel_frames,
-            "Audio exceeds chunk limit; transcribing in chunks"
+            "Chunking audio"
         );
         chunks
     } else {
@@ -254,28 +256,26 @@ fn transcribe_one(
         let generated = match model_state {
             ModelState::Q4 { model } => model.transcribe_streaming(mel_tensor, t_embed.clone()),
             ModelState::F32 { model } => {
-                transcribe_f32_with_model(model, mel_tensor, t_embed.clone(), device)?
+                transcribe_f32(model, mel_tensor, t_embed.clone(), device)?
             }
         };
 
-        let text = decode_tokens(tokenizer, &generated)?;
+        let text_tokens: Vec<u32> = generated
+            .iter()
+            .filter(|&&t| t >= 1000)
+            .map(|&t| t as u32)
+            .collect();
+        let text = tokenizer
+            .decode(&text_tokens)
+            .context("Failed to decode tokens")?;
         if !text.trim().is_empty() {
             texts.push(text.trim().to_string());
         }
     }
 
-    if total_chunks > 1 {
-        info!(
-            total_chunks,
-            total_time = format_duration(start.elapsed()),
-            "Transcription complete"
-        );
-    }
-
     Ok(texts.join(" "))
 }
 
-/// Build a mel spectrogram tensor from an audio buffer.
 fn mel_tensor_from_audio(
     audio: &AudioBuffer,
     mel_extractor: &MelSpectrogram,
@@ -286,11 +286,9 @@ fn mel_tensor_from_audio(
     let mel = mel_extractor.compute_log(&padded.samples);
     let n_frames = mel.len();
     let n_mels = if n_frames > 0 { mel[0].len() } else { 0 };
-
     if n_frames == 0 {
         bail!("Audio too short to produce mel frames");
     }
-    info!(frames = n_frames, bins = n_mels, "Mel spectrogram computed");
 
     let mut mel_transposed = vec![vec![0.0f32; n_frames]; n_mels];
     for (frame_idx, frame) in mel.iter().enumerate() {
@@ -305,61 +303,7 @@ fn mel_tensor_from_audio(
     ))
 }
 
-/// Filter control tokens and decode to text.
-fn decode_tokens(tokenizer: &VoxtralTokenizer, generated: &[i32]) -> Result<String> {
-    let text_tokens: Vec<u32> = generated
-        .iter()
-        .filter(|&&t| t >= 1000)
-        .map(|&t| t as u32)
-        .collect();
-    tokenizer
-        .decode(&text_tokens)
-        .context("Failed to decode tokens")
-}
-
-/// Format a duration as HH:MM:SS.
-fn format_duration(d: Duration) -> String {
-    let s = d.as_secs();
-    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
-}
-
-/// Catch cubek-matmul shared-memory panics and convert to actionable errors.
-fn run_with_chunk_hint<F, T>(max_mel_frames: usize, f: F) -> Result<T>
-where
-    F: FnOnce() -> Result<T>,
-{
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(result) => result,
-        Err(payload) => {
-            let msg = panic_payload_to_string(payload.as_ref());
-            if msg.contains("Unable to launch matmul")
-                || msg.contains("shared memory bytes")
-                || msg.contains("hardware limit is")
-            {
-                let suggested = (max_mel_frames - 200).max(600);
-                bail!(
-                    "GPU kernel launch failed due to shared-memory limits.\n\
-                     Try a smaller chunk size: --max-mel-frames {suggested} (current: {max_mel_frames})\n\
-                     Original error: {msg}"
-                );
-            }
-            bail!("Transcription panicked: {msg}");
-        }
-    }
-}
-
-fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<String>() {
-        return s.clone();
-    }
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        return (*s).to_string();
-    }
-    "unknown panic payload".to_string()
-}
-
-/// f32 inference with an already-loaded model.
-fn transcribe_f32_with_model(
+fn transcribe_f32(
     model: &voxtral_mini_realtime::models::voxtral::VoxtralModel<Backend>,
     mel_tensor: Tensor<Backend, 3>,
     t_embed: Tensor<Backend, 3>,
@@ -389,11 +333,9 @@ fn transcribe_f32_with_model(
         device,
     );
     let prefix_text_embeds = model.decoder().embed_tokens(prefix_tensor);
-
     let prefix_audio = audio_embeds
         .clone()
         .slice([0..1, 0..PREFIX_LEN, 0..d_model]);
-
     let prefix_inputs = prefix_audio + prefix_text_embeds;
     let hidden = model.decoder().forward_hidden_with_cache(
         prefix_inputs,
@@ -401,11 +343,9 @@ fn transcribe_f32_with_model(
         &mut decoder_cache,
     );
     let logits = model.decoder().lm_head(hidden);
-
     let vocab_size = logits.dims()[2];
     let last_logits = logits.slice([0..1, (PREFIX_LEN - 1)..PREFIX_LEN, 0..vocab_size]);
-    let first_pred = last_logits.argmax(2);
-    let first_token: i32 = first_pred.into_scalar().elem();
+    let first_token: i32 = last_logits.argmax(2).into_scalar().elem();
 
     let mut generated = prefix;
     generated.push(first_token);
@@ -417,22 +357,56 @@ fn transcribe_f32_with_model(
             device,
         );
         let text_embed = model.decoder().embed_tokens(token_tensor);
-
         let audio_pos = audio_embeds
             .clone()
             .slice([0..1, (pos - 1)..pos, 0..d_model]);
-
         let input = audio_pos + text_embed;
         let hidden =
             model
                 .decoder()
                 .forward_hidden_with_cache(input, t_embed.clone(), &mut decoder_cache);
         let logits = model.decoder().lm_head(hidden);
-
-        let pred = logits.argmax(2);
-        let next_token: i32 = pred.into_scalar().elem();
+        let next_token: i32 = logits.argmax(2).into_scalar().elem();
         generated.push(next_token);
     }
 
     Ok(generated.into_iter().skip(PREFIX_LEN).collect())
+}
+
+fn format_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+fn run_with_chunk_hint<F, T>(max_mel_frames: usize, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let msg = panic_payload_to_string(payload.as_ref());
+            if msg.contains("Unable to launch matmul")
+                || msg.contains("shared memory bytes")
+                || msg.contains("hardware limit is")
+            {
+                let suggested = (max_mel_frames - 200).max(600);
+                bail!(
+                    "GPU kernel launch failed (shared-memory limits).\n\
+                     Try: --max-mel-frames {suggested} (current: {max_mel_frames})"
+                );
+            }
+            bail!("Transcription panicked: {msg}");
+        }
+    }
+}
+
+fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+    "unknown panic payload".to_string()
 }
