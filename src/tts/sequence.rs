@@ -61,20 +61,12 @@ pub fn build_input_sequence<B: Backend>(
         .collect();
 
     // Build sequence: [BOS, BEGIN_AUDIO, voice_0..N, NEXT_AUDIO_TEXT, text_0..M, REPEAT_AUDIO_TEXT, BEGIN_AUDIO]
-    // Per mistral-common encode_speech_request: positions 2..N+1 have voice embeddings
-    // replacing [AUDIO](24) placeholder tokens
-    let mut parts: Vec<Tensor<B, 2>> = Vec::new();
-    parts.push(bos_embed);
-    parts.push(begin_audio_embed.clone());
-
-    // Voice embeddings replace [AUDIO](24) placeholders — already [N, dim]
-    let [n_voice, _] = voice_embeddings.dims();
-    for i in 0..n_voice {
-        let row = voice_embeddings.clone().slice([i..i + 1, 0..dim]);
-        parts.push(row);
-    }
-
-    parts.push(next_audio_text_embed);
+    let mut parts: Vec<Tensor<B, 2>> = vec![
+        bos_embed,
+        begin_audio_embed.clone(),
+        voice_embeddings,
+        next_audio_text_embed,
+    ];
     parts.extend(text_embeds);
     parts.push(repeat_audio_text_embed);
     parts.push(begin_audio_embed);

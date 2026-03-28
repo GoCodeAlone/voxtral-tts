@@ -5,6 +5,7 @@
  *   { type: 'init' }
  *   { type: 'loadFromServer' }
  *   { type: 'loadVoice', voiceName }
+ *   { type: 'tokenize', text }
  *   { type: 'synthesize', tokenIds, maxFrames }
  *   { type: 'clearCache' }
  *   { type: 'checkCache' }
@@ -157,7 +158,7 @@ async function handleSynthesize(tokenIds, maxFrames) {
         : new Uint32Array(tokenIds);
 
     const samples = await tts.synthesize(ids, maxFrames);
-    self.postMessage({ type: 'audio', samples: Array.from(samples), sampleRate: 24000 });
+    self.postMessage({ type: 'audio', samples, sampleRate: 24000 }, [samples.buffer]);
 }
 
 async function handleClearCache() {

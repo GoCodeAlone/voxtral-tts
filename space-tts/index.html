@@ -125,10 +125,7 @@
       <button class="primary" id="speakBtn" disabled>Speak</button>
     </div>
     <div class="param-row">
-      <span class="param-label">Euler steps</span>
-      <input type="range" id="eulerSteps" min="2" max="8" value="3" step="1">
-      <span class="param-value" id="eulerValue">3</span>
-      <span class="param-label" style="color:#666">(fewer = faster)</span>
+      <span class="param-label" style="color:#666">8 Euler steps (default). Use the native CLI with --euler-steps 3 for real-time.</span>
     </div>
   </div>
 
@@ -176,16 +173,9 @@ const audioPlayer = document.getElementById('audioPlayer');
 const audioInfo = document.getElementById('audioInfo');
 const timingInfo = document.getElementById('timingInfo');
 const downloadBtn = document.getElementById('downloadBtn');
-const eulerSteps = document.getElementById('eulerSteps');
-const eulerValue = document.getElementById('eulerValue');
-
 let lastWavBlob = null;
 let modelLoaded = false;
 let currentVoice = null;
-
-eulerSteps.addEventListener('input', () => {
-    eulerValue.textContent = eulerSteps.value;
-});
 
 function setStatus(state, text) {
     dot.className = 'dot ' + state;
@@ -274,9 +264,7 @@ speakBtn.addEventListener('click', async () => {
         // Tokenize via WASM Tekken BPE
         const tokenIds = await client.tokenize(text);
 
-        // Synthesize
-        const steps = parseInt(eulerSteps.value);
-        // max_frames roughly: more text = more frames needed
+        // Synthesize — max_frames roughly: more text = more frames needed
         const maxFrames = Math.min(2000, Math.max(50, tokenIds.length * 30));
 
         showProgress('Synthesizing...', null);

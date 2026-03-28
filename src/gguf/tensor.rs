@@ -87,6 +87,11 @@ impl Q4Tensor {
     pub fn read_bytes(&self) -> Vec<u8> {
         let raw = self.client.read_one(self.handle.clone());
         let expected = self.num_blocks * 18;
+        assert!(
+            raw.len() >= expected,
+            "Q4Tensor::read_bytes: GPU buffer shorter than expected: got {}, expected {expected}",
+            raw.len()
+        );
         raw[..expected].to_vec()
     }
 

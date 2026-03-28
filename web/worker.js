@@ -184,7 +184,8 @@ async function handleLoadVoice(voiceName) {
     if (!tts) throw new Error('TTS not initialized.');
 
     if (voiceCache.has(voiceName)) {
-        return; // Already loaded
+        self.postMessage({ type: 'voiceLoaded', voiceName });
+        return;
     }
 
     self.postMessage({ type: 'progress', stage: `Loading voice "${voiceName}"...` });
@@ -195,6 +196,7 @@ async function handleLoadVoice(voiceName) {
     const buf = await resp.arrayBuffer();
     tts.loadVoice(new Uint8Array(buf));
     voiceCache.set(voiceName, true);
+    self.postMessage({ type: 'voiceLoaded', voiceName });
 }
 
 async function handleSynthesize(tokenIds, maxFrames) {
@@ -209,5 +211,5 @@ async function handleSynthesize(tokenIds, maxFrames) {
         : new Uint32Array(tokenIds);
 
     const samples = await tts.synthesize(ids, maxFrames);
-    self.postMessage({ type: 'audio', samples, sampleRate: 24000 });
+    self.postMessage({ type: 'audio', samples, sampleRate: 24000 }, [samples.buffer]);
 }
