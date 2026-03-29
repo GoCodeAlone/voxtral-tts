@@ -1,13 +1,19 @@
 # Voxtral Mini 4B Realtime (Rust)
 
-[![HuggingFace](https://img.shields.io/badge/%F0%9F%A4%97-Model_on_HuggingFace-yellow)](https://huggingface.co/TrevorJS/voxtral-mini-realtime-gguf)
-[![Live Demo](https://img.shields.io/badge/%F0%9F%94%8A-Live_Demo-blue)](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime)
+[![HuggingFace ASR](https://img.shields.io/badge/%F0%9F%A4%97-ASR_Model-yellow)](https://huggingface.co/TrevorJS/voxtral-mini-realtime-gguf)
+[![HuggingFace TTS](https://img.shields.io/badge/%F0%9F%A4%97-TTS_Model-yellow)](https://huggingface.co/TrevorJS/voxtral-tts-q4-gguf)
+[![ASR Demo](https://img.shields.io/badge/%F0%9F%8E%99%EF%B8%8F-ASR_Demo-blue)](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime)
+[![TTS Demo](https://img.shields.io/badge/%F0%9F%94%8A-TTS_Demo-purple)](https://huggingface.co/spaces/TrevorJS/voxtral-4b-tts)
 
-Streaming speech recognition running natively and in the browser. A pure Rust implementation of [Mistral's Voxtral Mini 4B Realtime](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) model using the [Burn](https://burn.dev) ML framework.
+Streaming speech recognition and text-to-speech running natively and in the browser. A pure Rust implementation of Mistral's [Voxtral Mini 4B Realtime](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) (ASR) and [Voxtral 4B TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) models using the [Burn](https://burn.dev) ML framework.
 
 ## Benchmarks
 
-NVIDIA DGX Spark (GB10, LPDDR5x), 16s test audio, 3-run average:
+NVIDIA DGX Spark (GB10, LPDDR5x).
+
+### ASR (Speech Recognition)
+
+16s test audio, 3-run average:
 
 | Path | Encode | Decode | Total | RTF | Tok/s | Memory |
 |------|--------|--------|-------|-----|-------|--------|
@@ -15,34 +21,50 @@ NVIDIA DGX Spark (GB10, LPDDR5x), 16s test audio, 3-run average:
 | BF16 native | 887 ms | 23689 ms | 24607 ms | 1.543 | 4.6 | 9.2 GB |
 | Q4 GGUF WASM | — | — | ~225 s | ~14.1 | ~0.5 | (browser) |
 
-- **RTF** (Real-Time Factor): 0.416 means transcription completes in under half the audio duration
-- Q4 decode is **4.2× faster** than F32 — fused dequant+matmul avoids materializing 9 GB of weights
-- Custom WGSL compute shaders with vectorized u32 reads and vec4 dot products
-- Dual-path kernel dispatch: shared-memory tiled kernel for single-token decode, naive kernel for multi-row encode/prefill
 - **8.49% WER** on FLEURS English (647 utterances), vs. Mistral's reported 4.90% at f32
 
-The Q4 GGUF quantized path (2.5 GB) runs entirely client-side in a browser tab via WASM + WebGPU. [Try it live.](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime)
+### TTS (Text-to-Speech)
+
+"The quick brown fox jumps over the lazy dog" (9 tokens), casual_female voice:
+
+| Path | Euler Steps | Gen Time | Audio | RTF | Model Size |
+|------|-------------|----------|-------|-----|------------|
+| **Q4 GGUF native** | 3 | 3.7s | 3.84s | **0.97** | 2.67 GB |
+| Q4 GGUF native | 4 | 5.0s | 4.96s | 1.01 | 2.67 GB |
+| BF16 native | 3 | 10.4s | 2.72s | 3.82 | ~8 GB |
+| BF16 native | 8 | 20.6s | 2.96s | 6.97 | ~8 GB |
+| Q4 GGUF WASM | 8 | 367s | 3.52s | 104 | 2.67 GB |
+
+- **RTF** < 1.0 means faster-than-real-time synthesis
+- Q4 at 3 Euler steps achieves **real-time** with perfect Whisper large-v3 transcription
+- Optimizations: batched CFG (2× → batch=2), fused QKV+gate/up projections, pre-allocated KV cache
+- Q4 model load: 3.9s native, 9.2s WASM (including shard download over localhost)
+- 20 preset voices across 9 languages. Use `--euler-steps` to tune speed/quality tradeoff
+
+### Architecture Notes
+
+- Custom WGSL compute shaders with vectorized u32 reads and vec4 dot products
+- Dual-path kernel dispatch: shared-memory tiled kernel for single-token decode, naive kernel for multi-row encode/prefill
+- Q4 GGUF (2.5 GB ASR, 2.67 GB TTS) runs entirely client-side in a browser tab via WASM + WebGPU
+
+Try the demos: [ASR (speech-to-text)](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime) | [TTS (text-to-speech)](https://huggingface.co/spaces/TrevorJS/voxtral-4b-tts)
 
 ## Quick Start
 
 ### Native CLI
 
 ```bash
-# Download model weights (~9 GB)
+# Download ASR model weights (~9 GB BF16 or ~2.5 GB Q4)
 uv run --with huggingface_hub \
   hf download mistralai/Voxtral-Mini-4B-Realtime-2602 --local-dir models/voxtral
+uv run --with huggingface_hub \
+  hf download TrevorJS/voxtral-mini-realtime-gguf --local-dir models/
 
-# Transcribe an audio file (BF16 SafeTensors path)
-cargo run --release --features "wgpu,cli,hub" --bin voxtral-transcribe -- \
-  --audio audio.wav --model models/voxtral
-
-# To run gguf quantized models,
-# download the models ~2.5GB
-uv run --with huggingface_hub hf download TrevorJS/voxtral-mini-realtime-gguf --local-dir models/
-
-# To transcribe the audio file
-cargo run --release --features "wgpu,cli,hub" --bin voxtral-transcribe -- \
-  --audio audio.wav --gguf models/voxtral-q4.gguf --tokenizer models/tekken.json
+# Transcribe audio (BF16 or Q4)
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
+  transcribe --audio audio.wav --model models/voxtral
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
+  transcribe --audio audio.wav --gguf models/voxtral-q4.gguf
 ```
 
 ### Browser Demo
@@ -62,7 +84,32 @@ bun serve.mjs
 
 Open `https://localhost:8443`, accept the certificate, and click **Load from Server** to download the model shards. Record from your microphone or upload a WAV file to transcribe.
 
-[Hosted demo on HuggingFace Spaces](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime) if you want to skip local setup.
+Hosted demos: [ASR on HuggingFace Spaces](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime) | [TTS on HuggingFace Spaces](https://huggingface.co/spaces/TrevorJS/voxtral-4b-tts)
+
+### Text-to-Speech
+
+```bash
+# Download TTS model weights (~8 GB BF16 or ~2.67 GB Q4)
+uv run --with huggingface_hub \
+  hf download mistralai/Voxtral-4B-TTS-2603 --local-dir models/voxtral-tts
+uv run --with huggingface_hub \
+  hf download TrevorJS/voxtral-tts-q4-gguf voxtral-tts-q4.gguf --local-dir models
+
+# Synthesize speech (BF16 or Q4)
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
+  speak --text "Hello world" --voice casual_female
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
+  speak --text "Hello world" --voice casual_female --gguf models/voxtral-tts-q4.gguf
+
+# Real-time with 3 Euler steps
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
+  speak --text "Hello world" --gguf models/voxtral-tts-q4.gguf --euler-steps 3
+
+# List available voices
+cargo run --release --features "wgpu,cli,hub" --bin voxtral -- speak --list-voices
+```
+
+20 preset voices across 9 languages. The TTS pipeline runs backbone (Ministral 3B) autoregressive decoding, flow-matching acoustic prediction, and codec synthesis to produce 24 kHz audio.
 
 ## Architecture
 
@@ -119,7 +166,7 @@ wasm-pack build --target web --no-default-features --features wasm
 | Feature | Description |
 |---------|-------------|
 | `wgpu` (default) | GPU backend via Burn/CubeCL (WebGPU, Vulkan, Metal) |
-| `native-tokenizer` (default) | Tekken tokenizer (C deps, not WASM-compatible) |
+| `native-tokenizer` (default) | Tekken BPE encoding via tiktoken (WASM-compatible) |
 | `wasm` | Browser support: wasm-bindgen, WebGPU device init, JS bindings |
 | `cli` | CLI binary with clap + indicatif |
 | `hub` | HuggingFace Hub model downloads |
@@ -144,13 +191,19 @@ GPU-dependent tests (model layer shapes, Q4 matmul, WGSL shader correctness) are
 
 ### Q4 GGUF Sharding (for browser)
 
-The GGUF file must be split into shards of 512 MB or less to stay under the browser's `ArrayBuffer` limit:
+GGUF files must be split into shards of 512 MB or less to stay under the browser's `ArrayBuffer` limit:
 
 ```bash
+# ASR shards
 split -b 512m models/voxtral-q4.gguf models/voxtral-q4-shards/shard-
+
+# TTS shards (quantize first, then shard)
+uv run --with safetensors --with torch --with numpy --with packaging \
+  scripts/quantize_tts_gguf.py models/voxtral-tts/ -o models/voxtral-tts-q4.gguf
+split -b 512m models/voxtral-tts-q4.gguf models/voxtral-tts-q4-shards/shard-
 ```
 
-The dev server and E2E test discover shards automatically from `models/voxtral-q4-shards/`.
+The dev server discovers shards from `models/voxtral-q4-shards/` (ASR) and `models/voxtral-tts-q4-shards/` (TTS).
 
 ## Project Structure
 
@@ -160,8 +213,10 @@ src/
   models/         # BF16 model: encoder, decoder, adapter, attention, RoPE, KV cache
   gguf/           # Q4 GGUF: reader, loader, model, tensor, WGSL shader, tests
   web/            # WASM bindings: VoxtralQ4, initWgpuDevice, async decode loop
-  tokenizer/      # Tekken tokenizer wrapper (native only)
-  bin/transcribe  # CLI binary
+  tts/            # TTS pipeline: backbone, flow matching, codec, voice presets
+  tokenizer/      # Tekken tokenizer: decode (ASR) + encode (TTS via tiktoken)
+  bin/transcribe  # ASR CLI binary
+  bin/speak       # TTS CLI binary
 
 web/              # Browser demo: index.html, worker.js, voxtral-client.js
 tests/            # Integration tests + Playwright E2E spec

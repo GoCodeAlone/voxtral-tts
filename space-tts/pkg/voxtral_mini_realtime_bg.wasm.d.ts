@@ -1,0 +1,34 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_tekkentokenizerwasm_free: (a: number, b: number) => void;
+export const __wbg_voxtralq4_free: (a: number, b: number) => void;
+export const __wbg_voxtraltts_free: (a: number, b: number) => void;
+export const initWgpuDevice: () => any;
+export const tekkentokenizerwasm_encode: (a: number, b: number, c: number) => [number, number];
+export const tekkentokenizerwasm_new: (a: number, b: number) => [number, number, number];
+export const voxtralq4_appendModelShard: (a: number, b: number, c: number) => void;
+export const voxtralq4_getSampleRate: (a: number) => number;
+export const voxtralq4_isReady: (a: number) => number;
+export const voxtralq4_loadModel: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const voxtralq4_loadModelFromShards: (a: number, b: number, c: number) => [number, number];
+export const voxtralq4_new: () => number;
+export const voxtralq4_transcribe: (a: number, b: number, c: number) => any;
+export const voxtraltts_appendModelShard: (a: number, b: number, c: number) => void;
+export const voxtraltts_isReady: (a: number) => number;
+export const voxtraltts_loadModelFromShards: (a: number) => [number, number];
+export const voxtraltts_loadVoice: (a: number, b: number, c: number) => [number, number];
+export const voxtraltts_new: () => number;
+export const voxtraltts_synthesize: (a: number, b: number, c: number, d: number) => any;
+export const start: () => void;
+export const wasm_bindgen__closure__destroy__hd6e701f6b11034a8: (a: number, b: number) => void;
+export const wasm_bindgen__convert__closures_____invoke__h0bf2673d9a4ed97e: (a: number, b: number, c: any, d: any) => void;
+export const wasm_bindgen__convert__closures_____invoke__h658b39318c0bce1e: (a: number, b: number, c: any) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_start: () => void;

@@ -282,14 +282,15 @@ impl<B: Backend> Attention<B> {
         let repeat_factor = self.n_heads / self.n_kv_heads;
         let [batch, n_kv_heads, seq, head_dim] = k.dims();
 
-        // Repeat: [batch, n_kv_heads, seq, head_dim] -> [batch, n_heads, seq, head_dim]
+        // Use expand() (zero-copy broadcast) instead of repeat_dim (materialized copy).
+        // expand() + reshape is ~3 fewer GPU kernel launches than unsqueeze + repeat + reshape.
         let k = k
-            .unsqueeze_dim::<5>(2) // [batch, n_kv_heads, 1, seq, head_dim]
-            .repeat_dim(2, repeat_factor) // [batch, n_kv_heads, repeat, seq, head_dim]
+            .reshape([batch, n_kv_heads, 1, seq, head_dim])
+            .expand([batch, n_kv_heads, repeat_factor, seq, head_dim])
             .reshape([batch, n_kv_heads * repeat_factor, seq, head_dim]);
         let v = v
-            .unsqueeze_dim::<5>(2)
-            .repeat_dim(2, repeat_factor)
+            .reshape([batch, n_kv_heads, 1, seq, head_dim])
+            .expand([batch, n_kv_heads, repeat_factor, seq, head_dim])
             .reshape([batch, n_kv_heads * repeat_factor, seq, head_dim]);
 
         (k, v)

@@ -1,6 +1,9 @@
 //! Language model decoder layer.
 //!
 //! GQA attention with sliding window and no biases.
+//! Supports two norm modes:
+//! - **Ada**: ADA RMSNorm with temporal conditioning (ASR decoder)
+//! - **Plain**: Standard pre-norm without temporal conditioning (TTS backbone)
 
 use burn::config::Config;
 use burn::module::{Module, Param, ParamId};
@@ -28,7 +31,8 @@ pub struct DecoderLayerConfig {
     /// MLP hidden dimension.
     pub mlp_hidden_dim: usize,
     /// Temporal conditioning dimension for ADA RMSNorm.
-    pub t_cond_dim: usize,
+    /// When `None`, the layer operates in plain mode (no ADA modulation).
+    pub t_cond_dim: Option<usize>,
     /// Sliding window size for attention.
     pub sliding_window: Option<usize>,
     /// RMSNorm epsilon.
@@ -38,24 +42,26 @@ pub struct DecoderLayerConfig {
 
 /// Language model decoder layer.
 ///
-/// Architecture (Pre-LN with ADA modulation):
+/// Two operating modes controlled at construction time:
+///
+/// **Ada mode** (ASR decoder, `t_cond_dim = Some(_)`):
 /// ```text
 /// x -> RMSNorm -> Attention -> + -> x'
-///                              |
+///                               |
 /// x' -> RMSNorm -> ADA_mod(t_embed) -> SwiGLU -> + -> out
 /// ```
 ///
-/// The ADA modulation happens AFTER ffn_norm and BEFORE the MLP,
-/// per vLLM's implementation: hidden_states * (1 + ada_rms_norm_t_cond(t_cond))
-///
-/// Key differences from encoder:
-/// - Uses GQA (32 query heads, 8 KV heads)
-/// - No biases on linear layers
-/// - Larger sliding window (8192)
+/// **Plain mode** (TTS backbone, `t_cond_dim = None`):
+/// ```text
+/// x -> RMSNorm -> Attention -> + -> x'
+///                               |
+/// x' -> RMSNorm -> SwiGLU -> + -> out
+/// ```
 #[derive(Module, Debug)]
 pub struct DecoderLayer<B: Backend> {
-    /// Pre-attention ADA normalization.
-    ada_rms_norm: AdaRmsNorm<B>,
+    /// Optional ADA RMSNorm for temporal conditioning.
+    /// `Some` = Ada mode (ASR), `None` = Plain mode (TTS backbone).
+    ada_rms_norm: Option<AdaRmsNorm<B>>,
     /// Pre-attention standard normalization.
     attention_norm: RmsNorm<B>,
     /// Self-attention with GQA.
@@ -69,9 +75,11 @@ pub struct DecoderLayer<B: Backend> {
 impl DecoderLayerConfig {
     /// Initialize the decoder layer.
     pub fn init<B: Backend>(&self, device: &B::Device) -> DecoderLayer<B> {
-        let ada_rms_norm = AdaRmsNormConfig::new(self.d_model, self.t_cond_dim)
-            .with_eps(self.norm_eps)
-            .init(device);
+        let ada_rms_norm = self.t_cond_dim.map(|t_cond_dim| {
+            AdaRmsNormConfig::new(self.d_model, t_cond_dim)
+                .with_eps(self.norm_eps)
+                .init(device)
+        });
 
         let attention_norm = RmsNormConfig::new(self.d_model)
             .with_eps(self.norm_eps)
@@ -105,7 +113,7 @@ impl DecoderLayerConfig {
 }
 
 impl<B: Backend> DecoderLayer<B> {
-    /// Create decoder layer from components (for weight loading).
+    /// Create decoder layer with ADA norm from components (for weight loading).
     ///
     /// Note: The ada_norm weights are stored differently in SafeTensors:
     /// - ada_norm_down: [t_cond_dim, d_model] - projects d_model -> t_cond_dim
@@ -149,7 +157,7 @@ impl<B: Backend> DecoderLayer<B> {
         let ffn = SwiGLU::new(w1, w2, w3);
 
         Self {
-            ada_rms_norm,
+            ada_rms_norm: Some(ada_rms_norm),
             attention_norm,
             attention,
             ffn_norm,
@@ -157,11 +165,57 @@ impl<B: Backend> DecoderLayer<B> {
         }
     }
 
+    /// Create decoder layer in plain mode from components (for TTS weight loading).
+    pub fn new_plain(
+        attention_norm_weight: Tensor<B, 1>,
+        attention: Attention<B>,
+        ffn_norm_weight: Tensor<B, 1>,
+        w1: Linear<B>,
+        w2: Linear<B>,
+        w3: Linear<B>,
+        eps: f64,
+    ) -> Self {
+        let attention_norm = RmsNorm {
+            weight: burn::nn::RmsNorm {
+                gamma: Param::initialized(ParamId::new(), attention_norm_weight),
+                epsilon: eps,
+            },
+        };
+
+        let ffn_norm = RmsNorm {
+            weight: burn::nn::RmsNorm {
+                gamma: Param::initialized(ParamId::new(), ffn_norm_weight),
+                epsilon: eps,
+            },
+        };
+
+        let ffn = SwiGLU::new(w1, w2, w3);
+
+        Self {
+            ada_rms_norm: None,
+            attention_norm,
+            attention,
+            ffn_norm,
+            ffn,
+        }
+    }
+
+    /// Apply ADA modulation if in Ada mode, or pass through in Plain mode.
+    fn apply_ada_norm(&self, x: Tensor<B, 3>, t_embed: Option<Tensor<B, 3>>) -> Tensor<B, 3> {
+        match &self.ada_rms_norm {
+            Some(ada) => {
+                let t = t_embed.expect("Ada mode requires t_embed");
+                ada.forward(x, t)
+            }
+            None => x,
+        }
+    }
+
     /// Forward pass.
     ///
     /// # Arguments
     /// * `x` - Input tensor [batch, seq, d_model]
-    /// * `t_embed` - Temporal embedding [batch, 1, d_model]
+    /// * `t_embed` - Temporal embedding [batch, 1, d_model]. Required for Ada mode, ignored in Plain mode.
     /// * `rope` - Rotary position embeddings
     /// * `offset` - Position offset for KV cache
     ///
@@ -170,7 +224,7 @@ impl<B: Backend> DecoderLayer<B> {
     pub fn forward(
         &self,
         x: Tensor<B, 3>,
-        t_embed: Tensor<B, 3>,
+        t_embed: Option<Tensor<B, 3>>,
         rope: &RoPE<B>,
         offset: usize,
     ) -> Tensor<B, 3> {
@@ -181,10 +235,9 @@ impl<B: Backend> DecoderLayer<B> {
         let x = x + residual;
 
         // MLP with residual
-        // ADA modulation happens AFTER ffn_norm and BEFORE MLP (per vLLM)
         let residual = x.clone();
         let x = self.ffn_norm.forward(x);
-        let x = self.ada_rms_norm.forward(x, t_embed.clone());
+        let x = self.apply_ada_norm(x, t_embed);
         let x = self.ffn.forward(x);
         x + residual
     }
@@ -193,7 +246,7 @@ impl<B: Backend> DecoderLayer<B> {
     ///
     /// # Arguments
     /// * `x` - Input tensor [batch, seq, d_model]
-    /// * `t_embed` - Temporal embedding [batch, 1, d_model]
+    /// * `t_embed` - Temporal embedding [batch, 1, d_model]. Required for Ada mode, ignored in Plain mode.
     /// * `rope` - Rotary position embeddings
     /// * `cache` - KV cache for this layer
     ///
@@ -202,7 +255,7 @@ impl<B: Backend> DecoderLayer<B> {
     pub fn forward_with_cache(
         &self,
         x: Tensor<B, 3>,
-        t_embed: Tensor<B, 3>,
+        t_embed: Option<Tensor<B, 3>>,
         rope: &RoPE<B>,
         cache: &mut KVCache<B>,
     ) -> Tensor<B, 3> {
@@ -213,10 +266,9 @@ impl<B: Backend> DecoderLayer<B> {
         let x = x + residual;
 
         // MLP with residual
-        // ADA modulation happens AFTER ffn_norm and BEFORE MLP (per vLLM)
         let residual = x.clone();
         let x = self.ffn_norm.forward(x);
-        let x = self.ada_rms_norm.forward(x, t_embed.clone());
+        let x = self.apply_ada_norm(x, t_embed);
         let x = self.ffn.forward(x);
         x + residual
     }
@@ -234,9 +286,10 @@ mod tests {
     fn test_decoder_layer_shape() {
         let device = Default::default();
 
-        // Voxtral LLM config
-        let config =
-            DecoderLayerConfig::new(3072, 32, 8, 128, 9216, 32).with_sliding_window(Some(8192));
+        // Voxtral LLM config (Ada mode)
+        let config = DecoderLayerConfig::new(3072, 32, 8, 128, 9216)
+            .with_t_cond_dim(Some(32))
+            .with_sliding_window(Some(8192));
         let layer = config.init::<TestBackend>(&device);
 
         let rope = RoPEConfig::new(128, 16384)
@@ -247,7 +300,7 @@ mod tests {
         let x = Tensor::<TestBackend, 3>::zeros([1, 10, 3072], &device);
         let t_embed = Tensor::<TestBackend, 3>::zeros([1, 1, 3072], &device);
 
-        let out = layer.forward(x, t_embed, &rope, 0);
+        let out = layer.forward(x, Some(t_embed), &rope, 0);
 
         assert_eq!(out.dims(), [1, 10, 3072]);
     }
@@ -256,8 +309,10 @@ mod tests {
     fn test_decoder_layer_small() {
         let device = Default::default();
 
-        // Small config for faster testing
-        let config = DecoderLayerConfig::new(64, 4, 2, 16, 256, 8).with_sliding_window(Some(32));
+        // Small config for faster testing (Ada mode)
+        let config = DecoderLayerConfig::new(64, 4, 2, 16, 256)
+            .with_t_cond_dim(Some(8))
+            .with_sliding_window(Some(32));
         let layer = config.init::<TestBackend>(&device);
 
         let rope = RoPEConfig::new(16, 512)
@@ -267,8 +322,71 @@ mod tests {
         let x = Tensor::<TestBackend, 3>::zeros([2, 20, 64], &device);
         let t_embed = Tensor::<TestBackend, 3>::zeros([2, 1, 64], &device);
 
-        let out = layer.forward(x, t_embed, &rope, 0);
+        let out = layer.forward(x, Some(t_embed), &rope, 0);
 
         assert_eq!(out.dims(), [2, 20, 64]);
+    }
+
+    #[test]
+    fn test_decoder_layer_plain_mode() {
+        let device = Default::default();
+
+        // Plain mode (TTS backbone) — no t_cond_dim
+        let config = DecoderLayerConfig::new(64, 4, 2, 16, 256).with_sliding_window(Some(32));
+        let layer = config.init::<TestBackend>(&device);
+
+        let rope = RoPEConfig::new(16, 512)
+            .with_theta(1_000_000.0)
+            .init::<TestBackend>(&device);
+
+        let x = Tensor::<TestBackend, 3>::zeros([2, 20, 64], &device);
+
+        // Plain mode: no t_embed needed
+        let out = layer.forward(x, None, &rope, 0);
+        assert_eq!(out.dims(), [2, 20, 64]);
+    }
+
+    #[test]
+    fn test_plain_mode_with_cache() {
+        let device = Default::default();
+
+        let config = DecoderLayerConfig::new(64, 4, 2, 16, 256).with_sliding_window(Some(32));
+        let layer = config.init::<TestBackend>(&device);
+
+        let rope = RoPEConfig::new(16, 512)
+            .with_theta(1_000_000.0)
+            .init::<TestBackend>(&device);
+
+        let mut cache = KVCache::new();
+
+        // Prefill
+        let x = Tensor::<TestBackend, 3>::zeros([1, 10, 64], &device);
+        let out = layer.forward_with_cache(x, None, &rope, &mut cache);
+        assert_eq!(out.dims(), [1, 10, 64]);
+
+        // Decode step
+        let x = Tensor::<TestBackend, 3>::zeros([1, 1, 64], &device);
+        let out = layer.forward_with_cache(x, None, &rope, &mut cache);
+        assert_eq!(out.dims(), [1, 1, 64]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Ada mode requires t_embed")]
+    fn test_ada_mode_panics_without_t_embed() {
+        let device = Default::default();
+
+        let config = DecoderLayerConfig::new(64, 4, 2, 16, 256)
+            .with_t_cond_dim(Some(8))
+            .with_sliding_window(Some(32));
+        let layer = config.init::<TestBackend>(&device);
+
+        let rope = RoPEConfig::new(16, 512)
+            .with_theta(1_000_000.0)
+            .init::<TestBackend>(&device);
+
+        let x = Tensor::<TestBackend, 3>::zeros([1, 10, 64], &device);
+
+        // Should panic: Ada mode but no t_embed
+        let _ = layer.forward(x, None, &rope, 0);
     }
 }

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head><title>TTS WASM Benchmark</title></head>
+<body>
+<pre id="log">TTS WASM Benchmark - waiting for init...</pre>
+<script type="module">
+import init, { VoxtralTts, initWgpuDevice } from '../pkg/voxtral_mini_realtime.js';
+
+const log = document.getElementById('log');
+function print(msg) {
+    log.textContent += '\n' + msg;
+    console.log(msg);
+}
+
+async function run() {
+    // Init WASM + WebGPU
+    let t0 = performance.now();
+    await init();
+    await initWgpuDevice();
+    print(`WASM + WebGPU init: ${(performance.now() - t0).toFixed(0)}ms`);
+
+    const tts = new VoxtralTts();
+
+    // Load TTS shards
+    t0 = performance.now();
+    const shardsResp = await fetch('/api/tts-shards');
+    const { shards } = await shardsResp.json();
+    print(`Found ${shards.length} TTS shards`);
+
+    for (let i = 0; i < shards.length; i++) {
+        const resp = await fetch(`/models/voxtral-tts-q4-shards/${shards[i]}`);
+        const buf = await resp.arrayBuffer();
+        tts.appendModelShard(new Uint8Array(buf));
+        print(`  Shard ${i + 1}/${shards.length}: ${(buf.byteLength / 1024 / 1024).toFixed(0)} MB`);
+    }
+
+    const loadStart = performance.now();
+    tts.loadModelFromShards();
+    const loadMs = performance.now() - loadStart;
+    const totalLoadMs = performance.now() - t0;
+    print(`Model load (GPU): ${loadMs.toFixed(0)}ms`);
+    print(`Total shard download + load: ${totalLoadMs.toFixed(0)}ms`);
+
+    // Load voice
+    t0 = performance.now();
+    const voiceResp = await fetch('/models/voxtral-tts/voice_embedding/casual_female.safetensors');
+    const voiceBuf = await voiceResp.arrayBuffer();
+    tts.loadVoice(new Uint8Array(voiceBuf));
+    print(`Voice loaded: ${(performance.now() - t0).toFixed(0)}ms (${(voiceBuf.byteLength / 1024).toFixed(0)} KB)`);
+
+    // Token IDs for "Mary had a little lamb" (pre-tokenized to skip tiktoken in WASM)
+    const tokenIds = new Uint32Array([48650, 1880, 1261, 4945, 56914]);
+    print(`\nText: "Mary had a little lamb" (${tokenIds.length} tokens)`);
+
+    // Benchmark synthesis at different euler steps
+    // Note: euler_steps is baked into the model config (default 8)
+    // The WASM API doesn't expose set_euler_steps yet, so we benchmark at default
+    for (const maxFrames of [50, 100, 200]) {
+        t0 = performance.now();
+        const samples = await tts.synthesize(tokenIds, maxFrames);
+        const genMs = performance.now() - t0;
+        const duration = samples.length / 24000;
+        const rtf = (genMs / 1000) / duration;
+
+        // Check audio stats
+        let peak = 0;
+        let sumSq = 0;
+        for (let i = 0; i < samples.length; i++) {
+            const abs = Math.abs(samples[i]);
+            if (abs > peak) peak = abs;
+            sumSq += samples[i] * samples[i];
+        }
+        const rms = Math.sqrt(sumSq / samples.length);
+
+        print(`\n=== max_frames=${maxFrames} ===`);
+        print(`  Generation: ${genMs.toFixed(0)}ms`);
+        print(`  Audio: ${duration.toFixed(2)}s (${samples.length} samples @ 24kHz)`);
+        print(`  RTF: ${rtf.toFixed(2)}x`);
+        print(`  Peak: ${peak.toFixed(4)}, RMS: ${rms.toFixed(4)}`);
+    }
+
+    print('\n=== BENCHMARK COMPLETE ===');
+    // Signal to Playwright that we're done
+    window.__benchmarkDone = true;
+}
+
+run().catch(e => {
+    print(`ERROR: ${e}`);
+    window.__benchmarkDone = true;
+    window.__benchmarkError = e.message;
+});
+</script>
+</body>
+</html>

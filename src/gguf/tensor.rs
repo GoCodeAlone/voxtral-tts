@@ -80,6 +80,21 @@ impl Q4Tensor {
         self.num_blocks
     }
 
+    /// Read raw Q4_0 bytes from GPU.
+    ///
+    /// Returns exactly `num_blocks * 18` bytes (may include padding at end
+    /// that was added for 4-byte alignment).
+    pub fn read_bytes(&self) -> Vec<u8> {
+        let raw = self.client.read_one(self.handle.clone());
+        let expected = self.num_blocks * 18;
+        assert!(
+            raw.len() >= expected,
+            "Q4Tensor::read_bytes: GPU buffer shorter than expected: got {}, expected {expected}",
+            raw.len()
+        );
+        raw[..expected].to_vec()
+    }
+
     /// Dequantize the Q4_0 data to a full-precision `Tensor<Wgpu, 2>`.
     ///
     /// This reads the raw bytes back from GPU and dequantizes on CPU.

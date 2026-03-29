@@ -250,4 +250,26 @@ mod tests {
             assert!((a - b).abs() < 0.001, "Sample mismatch: {} vs {}", a, b);
         }
     }
+
+    #[test]
+    fn test_save_and_load_wav_24khz() {
+        let original = AudioBuffer::new(
+            (0..2400)
+                .map(|i| (i as f32 * 0.01 * std::f32::consts::PI).sin())
+                .collect(),
+            24000,
+        );
+
+        let tmp = NamedTempFile::new().unwrap();
+        original.save(tmp.path()).unwrap();
+        let loaded = load_wav(tmp.path()).unwrap();
+
+        assert_eq!(loaded.sample_rate, 24000);
+        assert_eq!(loaded.len(), original.len());
+
+        // Check samples are approximately equal (16-bit quantization introduces error)
+        for (a, b) in original.samples.iter().zip(loaded.samples.iter()) {
+            assert!((a - b).abs() < 0.001, "Sample mismatch: {} vs {}", a, b);
+        }
+    }
 }

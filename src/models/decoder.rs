@@ -112,8 +112,8 @@ impl LanguageModelConfig {
             self.n_kv_heads,
             self.head_dim,
             self.mlp_hidden_dim,
-            self.t_cond_dim,
         )
+        .with_t_cond_dim(Some(self.t_cond_dim))
         .with_sliding_window(self.sliding_window)
         .with_norm_eps(self.norm_eps)
         .init(device)
@@ -151,8 +151,8 @@ impl LanguageModelConfig {
                     self.n_kv_heads,
                     self.head_dim,
                     self.mlp_hidden_dim,
-                    self.t_cond_dim,
                 )
+                .with_t_cond_dim(Some(self.t_cond_dim))
                 .with_sliding_window(self.sliding_window)
                 .with_norm_eps(self.norm_eps)
                 .init(device)
@@ -233,7 +233,7 @@ impl<B: Backend> LanguageModel<B> {
         // Transformer layers
         let mut x = x;
         for layer in &self.layers {
-            x = layer.forward(x, t_embed.clone(), &self.rope, offset);
+            x = layer.forward(x, Some(t_embed.clone()), &self.rope, offset);
         }
 
         // Final normalization
@@ -268,7 +268,7 @@ impl<B: Backend> LanguageModel<B> {
     ) -> Tensor<B, 3> {
         let mut x = hidden_states;
         for layer in &self.layers {
-            x = layer.forward(x, t_embed.clone(), &self.rope, offset);
+            x = layer.forward(x, Some(t_embed.clone()), &self.rope, offset);
         }
         self.norm.forward(x)
     }
@@ -316,7 +316,7 @@ impl<B: Backend> LanguageModel<B> {
         let mut x = x;
         for (i, layer) in self.layers.iter().enumerate() {
             if let Some(cache) = caches.get_mut(i) {
-                x = layer.forward_with_cache(x, t_embed.clone(), &self.rope, cache);
+                x = layer.forward_with_cache(x, Some(t_embed.clone()), &self.rope, cache);
             }
         }
 
@@ -341,7 +341,7 @@ impl<B: Backend> LanguageModel<B> {
         let mut x = hidden_states;
         for (i, layer) in self.layers.iter().enumerate() {
             if let Some(cache) = caches.get_mut(i) {
-                x = layer.forward_with_cache(x, t_embed.clone(), &self.rope, cache);
+                x = layer.forward_with_cache(x, Some(t_embed.clone()), &self.rope, cache);
             }
         }
         self.norm.forward(x)
@@ -525,7 +525,7 @@ mod tests {
         let x = Tensor::<TestBackend, 3>::zeros([1, 3, 64], &device);
         let t = Tensor::<TestBackend, 3>::zeros([1, 1, 64], &device);
         let rope = config.init_rope::<TestBackend>(&device);
-        let out = layer.forward(x, t, &rope, 0);
+        let out = layer.forward(x, Some(t), &rope, 0);
         assert_eq!(out.dims(), [1, 3, 64]);
 
         let norm = config.init_norm::<TestBackend>(&device);

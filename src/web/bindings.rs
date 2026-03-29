@@ -430,3 +430,278 @@ impl Default for VoxtralQ4 {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tekken tokenizer for browser TTS
+// ---------------------------------------------------------------------------
+
+use crate::tokenizer::TekkenEncoder;
+
+/// Tekken BPE tokenizer for browser use.
+///
+/// Loads from a tekken.json string and encodes text to token IDs.
+#[cfg_attr(target_family = "wasm", wasm_bindgen)]
+pub struct TekkenTokenizerWasm {
+    encoder: TekkenEncoder,
+}
+
+#[cfg_attr(target_family = "wasm", wasm_bindgen)]
+impl TekkenTokenizerWasm {
+    /// Load tokenizer from a JSON string (fetched from HuggingFace).
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(constructor))]
+    pub fn new(json: &str) -> Result<TekkenTokenizerWasm, String> {
+        let encoder =
+            TekkenEncoder::from_json(json).map_err(|e| format!("Failed to load tokenizer: {e}"))?;
+        Ok(Self { encoder })
+    }
+
+    /// Encode text to token IDs (Uint32Array).
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        self.encoder.encode(text)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VoxtralTts — Q4 TTS pipeline for browser
+// ---------------------------------------------------------------------------
+
+use crate::gguf::tts_loader::Q4TtsModelLoader;
+use crate::gguf::tts_model::{Q4FmTransformer, Q4TtsBackbone};
+use crate::tts::backbone::GeneratedFrame;
+use crate::tts::codec::CodecDecoder;
+use crate::tts::config::{AudioCodebookLayout, TtsSpecialTokens};
+use crate::tts::embeddings::AudioCodebookEmbeddings;
+use crate::tts::voice::load_voice_from_bytes;
+
+/// Q4 GGUF Voxtral TTS model for browser use.
+///
+/// Loads a Q4-quantized GGUF model (split into ≤512 MB shards) and provides
+/// an async API for synthesizing speech via WebGPU.
+#[cfg_attr(target_family = "wasm", wasm_bindgen)]
+pub struct VoxtralTts {
+    backbone: Option<Q4TtsBackbone>,
+    fm: Option<Q4FmTransformer>,
+    codec: Option<CodecDecoder<Wgpu>>,
+    codebook: Option<AudioCodebookEmbeddings<Wgpu>>,
+    device: WgpuDevice,
+    shard_bufs: Vec<Vec<u8>>,
+    voice_embed: Option<Tensor<Wgpu, 2>>,
+}
+
+#[cfg_attr(target_family = "wasm", wasm_bindgen)]
+impl VoxtralTts {
+    /// Create a new VoxtralTts instance.
+    ///
+    /// Call `initWgpuDevice()` first, then create this, then load GGUF weights.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(constructor))]
+    pub fn new() -> Self {
+        console_error_panic_hook::set_once();
+        let device = WGPU_DEVICE
+            .get()
+            .cloned()
+            .unwrap_or_else(WgpuDevice::default);
+        Self {
+            backbone: None,
+            fm: None,
+            codec: None,
+            codebook: None,
+            device,
+            shard_bufs: Vec::new(),
+            voice_embed: None,
+        }
+    }
+
+    /// Append a GGUF shard to the internal buffer.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = appendModelShard))]
+    pub fn append_model_shard(&mut self, shard: &[u8]) {
+        self.shard_bufs.push(shard.to_vec());
+    }
+
+    /// Parse the accumulated shards as a GGUF file and load the TTS model.
+    ///
+    /// Uses two-phase loading: Q4 tensors loaded first, then GGUF reader
+    /// dropped (freeing shard memory), then tok_embeddings finalized.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = loadModelFromShards))]
+    pub fn load_model_from_shards(&mut self) -> Result<(), String> {
+        if self.shard_bufs.is_empty() {
+            return Err("No shards appended. Call appendModelShard first.".into());
+        }
+
+        let shards = std::mem::take(&mut self.shard_bufs);
+        let parts = {
+            let mut loader = Q4TtsModelLoader::from_shards(shards)
+                .map_err(|e| format!("Failed to parse GGUF: {e}"))?;
+            loader
+                .load_deferred(&self.device)
+                .map_err(|e| format!("Failed to load Q4 TTS model: {e}"))?
+        };
+
+        let (backbone, fm, codec) = parts
+            .finalize()
+            .map_err(|e| format!("Failed to finalize TTS model: {e}"))?;
+
+        // Build AudioCodebookEmbeddings from backbone's table
+        let layout = AudioCodebookLayout::default();
+        let codebook =
+            AudioCodebookEmbeddings::new(backbone.audio_codebook_embeddings().clone(), layout);
+
+        self.backbone = Some(backbone);
+        self.fm = Some(fm);
+        self.codec = Some(codec);
+        self.codebook = Some(codebook);
+
+        Ok(())
+    }
+
+    /// Load a voice embedding from SafeTensors bytes.
+    ///
+    /// Call this before `synthesize()`. Voices are ~200 KB each.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = loadVoice))]
+    pub fn load_voice(&mut self, voice_bytes: &[u8]) -> Result<(), String> {
+        let embed: Tensor<Wgpu, 2> = load_voice_from_bytes(voice_bytes, 3072, &self.device)
+            .map_err(|e| format!("Failed to load voice: {e}"))?;
+        self.voice_embed = Some(embed);
+        Ok(())
+    }
+
+    /// Check if the model and a voice are loaded.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = isReady))]
+    pub fn is_ready(&self) -> bool {
+        self.backbone.is_some() && self.voice_embed.is_some()
+    }
+
+    /// Synthesize speech from token IDs.
+    ///
+    /// Returns a Float32Array of 24 kHz audio samples.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen)]
+    pub async fn synthesize(&self, token_ids: &[u32], max_frames: u32) -> Result<Vec<f32>, String> {
+        let backbone = self
+            .backbone
+            .as_ref()
+            .ok_or("Model not loaded. Call loadModelFromShards first.")?;
+        let fm = self.fm.as_ref().ok_or("FM transformer not loaded.")?;
+        let codec = self.codec.as_ref().ok_or("Codec not loaded.")?;
+        let codebook = self.codebook.as_ref().ok_or("Codebook not loaded.")?;
+        let voice_embed = self
+            .voice_embed
+            .as_ref()
+            .ok_or("No voice loaded. Call loadVoice first.")?;
+
+        // Build input sequence using Q4 backbone's CPU-side embedding lookup
+        let input_sequence =
+            self.build_input_sequence_q4(backbone, voice_embed.clone(), token_ids)?;
+
+        // Async autoregressive decode (uses into_data_async for WASM safety)
+        let frames = backbone
+            .generate_async(input_sequence, fm, codebook, max_frames as usize)
+            .await?;
+
+        if frames.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Codec decode → waveform
+        let samples = self.decode_frames_async(codec, &frames).await?;
+        Ok(samples)
+    }
+}
+
+impl VoxtralTts {
+    /// Build the TTS input sequence using Q4 backbone's CPU-side embedding lookup.
+    fn build_input_sequence_q4(
+        &self,
+        backbone: &Q4TtsBackbone,
+        voice_embeddings: Tensor<Wgpu, 2>,
+        text_token_ids: &[u32],
+    ) -> Result<Tensor<Wgpu, 3>, String> {
+        let special = TtsSpecialTokens::default();
+        let dim = backbone.d_model();
+
+        // Embed special tokens via CPU Q4 dequant (WASM-safe)
+        let bos_embed = backbone.embed_tokens_from_ids(&[special.bos_token_id as i32], 1, 1);
+        let begin_audio_embed =
+            backbone.embed_tokens_from_ids(&[special.begin_audio_token_id as i32], 1, 1);
+        let next_audio_text_embed =
+            backbone.embed_tokens_from_ids(&[special.next_audio_text_token_id as i32], 1, 1);
+        let repeat_audio_text_embed =
+            backbone.embed_tokens_from_ids(&[special.repeat_audio_text_token_id as i32], 1, 1);
+
+        // Embed text tokens
+        let text_ids: Vec<i32> = text_token_ids.iter().map(|&id| id as i32).collect();
+        let text_embeds = if text_ids.is_empty() {
+            Tensor::<Wgpu, 3>::zeros([1, 0, dim], &self.device)
+        } else {
+            backbone.embed_tokens_from_ids(&text_ids, 1, text_ids.len())
+        };
+
+        // Voice embeddings: [N, dim] → [1, N, dim]
+        let voice_3d = voice_embeddings.unsqueeze_dim::<3>(0);
+
+        // Concatenate: [BOS, BEGIN_AUDIO, voice, NEXT_AUDIO_TEXT, text, REPEAT_AUDIO_TEXT, BEGIN_AUDIO]
+        let sequence = Tensor::cat(
+            vec![
+                bos_embed,
+                begin_audio_embed.clone(),
+                voice_3d,
+                next_audio_text_embed,
+                text_embeds,
+                repeat_audio_text_embed,
+                begin_audio_embed,
+            ],
+            1,
+        );
+
+        Ok(sequence)
+    }
+
+    /// Decode generated frames through the codec to produce audio samples.
+    async fn decode_frames_async(
+        &self,
+        codec: &CodecDecoder<Wgpu>,
+        frames: &[GeneratedFrame],
+    ) -> Result<Vec<f32>, String> {
+        let n_frames = frames.len();
+
+        let semantic_indices: Vec<usize> = frames.iter().map(|f| f.semantic_idx).collect();
+
+        let mut acoustic_data = Vec::with_capacity(n_frames * 36);
+        for frame in frames {
+            for &level in &frame.acoustic_levels {
+                acoustic_data.push(level as f32);
+            }
+        }
+        let acoustic_indices: Tensor<Wgpu, 2> = Tensor::from_data(
+            burn::tensor::TensorData::new(acoustic_data, [n_frames, 36]),
+            &self.device,
+        );
+
+        let waveform = codec.decode(&semantic_indices, acoustic_indices);
+        let [_batch, total_samples] = waveform.dims();
+
+        // Async readback of waveform samples
+        let wav_data = Tensor::<Wgpu, 2>::into_data_async(waveform)
+            .await
+            .map_err(|e| format!("waveform readback: {e}"))?;
+        let mut samples: Vec<f32> = wav_data
+            .to_vec::<f32>()
+            .map_err(|e| format!("waveform vec: {e}"))?;
+        samples.truncate(total_samples);
+
+        // Peak normalize to 0.95
+        let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        if peak > 1e-6 {
+            let gain = 0.95 / peak;
+            for s in &mut samples {
+                *s *= gain;
+            }
+        }
+
+        Ok(samples)
+    }
+}
+
+impl Default for VoxtralTts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
