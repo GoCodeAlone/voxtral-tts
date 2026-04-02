@@ -296,7 +296,7 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: Build WASM package
-        run: wasm-pack build --target web --no-default-features --features wasm --release
+        run: wasm-pack build --target web --no-default-features --features wasm
       - name: Package WASM artifacts
         run: |
           tar -czf voxtral-mini-realtime-wasm.tar.gz -C pkg .
@@ -310,7 +310,6 @@ jobs:
     needs:
       - plan
       - host
-      - build-wasm
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!

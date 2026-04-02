@@ -1,6 +1,6 @@
 [package]
 name = "voxtral-mini-realtime"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "Voxtral Mini 4B Realtime - Streaming ASR in Rust with Burn"
 license = "Apache-2.0"
