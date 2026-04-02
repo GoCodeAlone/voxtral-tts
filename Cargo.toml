@@ -118,6 +118,11 @@ required-features = ["wgpu"]
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# cargo-dist configuration
+[package.metadata.dist]
+features = ["wgpu", "cli", "hub"]
+dist = true
+
 [profile.release]
 lto = true
 codegen-units = 1
@@ -131,6 +136,11 @@ opt-level = "s"
 [profile.profiling]
 inherits = "release"
 debug = 1
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 # Patch cubecl-wgpu to cap subgroup size workaround against WebGPU's
 # max_compute_invocations_per_workgroup (256). Without this, cubek-reduce
