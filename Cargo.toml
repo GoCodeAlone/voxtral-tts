@@ -1,6 +1,6 @@
 [package]
 name = "voxtral-mini-realtime"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Voxtral Mini 4B Realtime - Streaming ASR in Rust with Burn"
 license = "Apache-2.0"
@@ -30,7 +30,7 @@ profiling = ["tracing-chrome"]
 
 [dependencies]
 # Burn ML framework - latest version with backend selection via features
-burn = { version = "0.20", default-features = false, features = ["std", "autodiff", "template"] }
+burn = { version = "0.20", default-features = false, features = ["std", "autodiff", "template", "autotune"] }
 cubecl = { version = "0.9", default-features = false, features = ["wgpu"] }
 
 # Tekken BPE encoding (tiktoken core, WASM-compatible)
