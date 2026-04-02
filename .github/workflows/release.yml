@@ -282,7 +282,8 @@ jobs:
   build-wasm:
     needs:
       - plan
-    if: ${{ needs.plan.outputs.publishing == 'true' }}
+      - host
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
     runs-on: "ubuntu-22.04"
     steps:
       - uses: actions/checkout@v6
