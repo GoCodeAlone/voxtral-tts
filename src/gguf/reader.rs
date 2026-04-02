@@ -219,8 +219,13 @@ impl<R: Read + Seek> GgufReader<R> {
         self.tensors.keys().map(|s| s.as_str()).collect()
     }
 
-    /// Maximum tensor data size to allocate (8 GB — largest reasonable model tensor).
+    /// Maximum tensor data size to allocate.
+    /// Native: 8 GB (largest reasonable model tensor).
+    /// WASM: 2 GB (wasm32 address space limit).
+    #[cfg(not(target_family = "wasm"))]
     const MAX_TENSOR_BYTES: usize = 8 * 1024 * 1024 * 1024;
+    #[cfg(target_family = "wasm")]
+    const MAX_TENSOR_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
     /// Read raw tensor data bytes from the file.
     pub fn tensor_data(&mut self, name: &str) -> Result<Vec<u8>> {
