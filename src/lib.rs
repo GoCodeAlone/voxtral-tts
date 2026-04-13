@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod audio_output;
+pub mod engine;
 pub mod ring_buffer;
 #[cfg(feature = "wgpu")]
 pub mod gguf;
@@ -19,6 +20,7 @@ mod test_utils;
 // Re-exports
 pub use audio::AudioBuffer;
 pub use audio_output::AudioOutputStream;
+pub use engine::{SpeakConfig, SpeakResult, TtsEngine};
 pub use ring_buffer::AudioRingBuffer;
 pub use tts::backbone::{GeneratedFrame, TtsBackbone};
 pub use tts::pipeline::TtsPipeline;
