@@ -1,0 +1,66 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  benchmark:
+    name: RTF Benchmark ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            os: [self-hosted, macOS, ARM64]
+            features: "wgpu,native-tokenizer"
+          - platform: linux-x64
+            os: [self-hosted, Linux, X64]
+            features: "wgpu,native-tokenizer"
+          - platform: windows-x64
+            os: [self-hosted, Windows, X64]
+            features: "wgpu,native-tokenizer"
+    runs-on: ${{ matrix.os }}
+    env:
+      CORE_DUMP_MODEL_DIR: ${{ vars.VOICE_MODEL_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run RTF benchmark
+        run: |
+          cargo test --release --features "${{ matrix.features }}" -- benchmark_tts_rtf --nocapture 2>&1 | tee benchmark-output.txt
+
+      - name: Parse and check regression
+        shell: bash
+        run: |
+          # Extract avg RTF from benchmark output
+          AVG_RTF=$(grep "Summary:" benchmark-output.txt | sed -n 's/.*avg=\([0-9.]*\)x.*/\1/p')
+          echo "Current avg RTF: ${AVG_RTF:-unknown}"
+
+          # Check baseline if it exists
+          if [ -f benchmarks/baseline-${{ matrix.platform }}.json ]; then
+            BASELINE_RTF=$(python3 -c "import json; print(json.load(open('benchmarks/baseline-${{ matrix.platform }}.json'))['rtf_avg'])" 2>/dev/null || echo "")
+            if [ -n "$BASELINE_RTF" ] && [ -n "$AVG_RTF" ]; then
+              THRESHOLD=$(python3 -c "print(float('$BASELINE_RTF') * 1.2)")
+              echo "Baseline: ${BASELINE_RTF}x, Threshold (20%): ${THRESHOLD}x"
+              if python3 -c "exit(0 if float('$AVG_RTF') <= float('$THRESHOLD') else 1)"; then
+                echo "PASS: RTF ${AVG_RTF}x within 20% of baseline ${BASELINE_RTF}x"
+              else
+                echo "FAIL: RTF ${AVG_RTF}x exceeds 20% regression threshold ${THRESHOLD}x"
+                exit 1
+              fi
+            fi
+          else
+            echo "No baseline found for ${{ matrix.platform }} — skipping regression check"
+          fi
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.platform }}
+          path: benchmark-output.txt
