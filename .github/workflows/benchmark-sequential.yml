@@ -1,0 +1,92 @@
+name: Benchmark (Sequential)
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: 'Backend to benchmark'
+        required: true
+        default: 'wgpu'
+        type: choice
+        options:
+          - wgpu
+          - metal
+          - cuda
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS ARM64
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 30
+    env:
+      CORE_DUMP_MODEL_DIR: ${{ vars.VOICE_MODEL_DIR }}
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmark
+        shell: bash
+        run: |
+          set -o pipefail
+          FEATURES="${{ inputs.backend }},native-tokenizer"
+          cargo test --profile bench --no-default-features --features "$FEATURES" \
+            --test benchmark_tts_rtf -- --nocapture 2>&1 | tee benchmark-macos.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-macos-arm64
+          path: benchmark-macos.txt
+
+  linux:
+    name: Linux X64
+    needs: macos
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    env:
+      CORE_DUMP_MODEL_DIR: ${{ vars.VOICE_MODEL_DIR }}
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmark
+        shell: bash
+        run: |
+          set -o pipefail
+          FEATURES="${{ inputs.backend }},native-tokenizer"
+          cargo test --profile bench --no-default-features --features "$FEATURES" \
+            --test benchmark_tts_rtf -- --nocapture 2>&1 | tee benchmark-linux.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-linux-x64
+          path: benchmark-linux.txt
+
+  windows:
+    name: Windows X64
+    needs: linux
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 30
+    env:
+      CORE_DUMP_MODEL_DIR: ${{ vars.VOICE_MODEL_DIR }}
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmark
+        shell: pwsh
+        run: |
+          $env:FEATURES = "${{ inputs.backend }},native-tokenizer"
+          cargo test --profile bench --no-default-features --features "$env:FEATURES" `
+            --test benchmark_tts_rtf -- --nocapture 2>&1 | Tee-Object benchmark-windows.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-windows-x64
+          path: benchmark-windows.txt
