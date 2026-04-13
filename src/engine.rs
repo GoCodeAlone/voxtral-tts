@@ -8,9 +8,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use burn::backend::wgpu::WgpuDevice;
-use burn::backend::Wgpu;
 use burn::tensor::{Tensor, TensorData};
+
+use crate::backend::{ActiveBackend, ActiveDevice};
 
 use crate::audio_output::AudioOutputStream;
 use crate::tts::codec::CodecDecoder;
@@ -64,11 +64,11 @@ pub struct SpeakResult {
 pub struct TtsEngine {
     backbone: Q4TtsBackbone,
     fm: Mutex<Q4FmTransformer>,
-    codec: CodecDecoder<Wgpu>,
+    codec: CodecDecoder<ActiveBackend>,
     tokenizer: TekkenEncoder,
     voices: VoiceRegistry,
     audio_out: AudioOutputStream,
-    device: WgpuDevice,
+    device: ActiveDevice,
 }
 
 impl TtsEngine {
@@ -88,7 +88,7 @@ impl TtsEngine {
         let tekken_path = model_dir.join("tekken.json");
         let voice_dir = model_dir.join("voice_embedding");
 
-        let device = WgpuDevice::default();
+        let device = ActiveDevice::default();
 
         // Load Q4 backbone, FM transformer, codec decoder
         let mut loader = Q4TtsModelLoader::from_file(&gguf_path)
@@ -151,7 +151,7 @@ impl TtsEngine {
         // Load voice embedding
         let voice_embed = self
             .voices
-            .load_voice::<Wgpu>(voice_id, &self.device)
+            .load_voice::<ActiveBackend>(voice_id, &self.device)
             .map_err(|e| format!("failed to load voice '{voice_id}': {e}"))?;
 
         // Build input sequence
@@ -183,7 +183,7 @@ impl TtsEngine {
                 // Codec decode this single frame → 1920 PCM samples
                 let acoustic_data: Vec<f32> =
                     frame.acoustic_levels.iter().map(|&v| v as f32).collect();
-                let acoustic_tensor = Tensor::<Wgpu, 2>::from_data(
+                let acoustic_tensor = Tensor::<ActiveBackend, 2>::from_data(
                     TensorData::new(acoustic_data, [1, 36]),
                     device,
                 );
@@ -247,10 +247,10 @@ impl TtsEngine {
     /// Build [1, seq_len, 3072] input embedding tensor for backbone prefill.
     fn build_input_sequence(
         &self,
-        voice_embed: Tensor<Wgpu, 2>,
+        voice_embed: Tensor<ActiveBackend, 2>,
         text_ids: &[i32],
         special: &TtsSpecialTokens,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let bos = self
             .backbone
             .embed_tokens_from_ids(&[special.bos_token_id as i32], 1, 1);

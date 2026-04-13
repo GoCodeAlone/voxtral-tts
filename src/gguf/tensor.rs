@@ -95,6 +95,33 @@ impl Q4Tensor {
         raw[..expected].to_vec()
     }
 
+    /// Dequantize all Q4_0 blocks to f32 for non-WGSL backends.
+    ///
+    /// Returns a flat `Vec<f32>` of shape `[N, K]` in row-major order.
+    /// Nibble order matches the WGSL shader exactly:
+    /// - Lower nibble of data byte `i` → element `i` within the block
+    /// - Upper nibble of data byte `i` → element `i + 16` within the block
+    pub fn dequantize_f32(&self) -> Vec<f32> {
+        let bytes = self.read_bytes();
+        let [n, k] = self.shape;
+        let blocks_per_row = k / 32;
+        let mut out = vec![0.0f32; n * k];
+        for block_idx in 0..(n * blocks_per_row) {
+            let block_offset = block_idx * 18;
+            let scale = half::f16::from_le_bytes([bytes[block_offset], bytes[block_offset + 1]])
+                .to_f32();
+            let base = block_idx * 32;
+            for i in 0..16 {
+                let byte = bytes[block_offset + 2 + i];
+                let lo = (byte & 0x0F) as f32 - 8.0;
+                let hi = ((byte >> 4) & 0x0F) as f32 - 8.0;
+                out[base + i] = lo * scale;
+                out[base + i + 16] = hi * scale;
+            }
+        }
+        out
+    }
+
     /// Dequantize the Q4_0 data to a full-precision `Tensor<Wgpu, 2>`.
     ///
     /// This reads the raw bytes back from GPU and dequantizes on CPU.

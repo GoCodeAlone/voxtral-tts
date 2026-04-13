@@ -5,10 +5,10 @@
 //! Non-linear ops (RMSNorm, RoPE, softmax, SiLU, convolutions) stay as
 //! regular Burn f32 tensors/ops.
 
-use burn::backend::wgpu::WgpuDevice;
-use burn::backend::Wgpu;
 use burn::nn::Linear;
 use burn::tensor::{Int, Tensor, TensorData};
+
+use crate::backend::{ActiveBackend, ActiveDevice};
 
 use crate::models::layers::{KVCache, LayerCaches, RmsNorm, RoPE};
 use crate::models::time_embedding::TimeEmbedding;
@@ -26,18 +26,18 @@ use super::model::TokEmbedStore;
 /// Plain pre-norm transformer layer (NO ADA RMSNorm — unlike ASR Q4DecoderLayer).
 /// Uses CAUSAL attention.
 pub struct Q4TtsDecoderLayer {
-    attention_norm: RmsNorm<Wgpu>,
+    attention_norm: RmsNorm<ActiveBackend>,
     pub(crate) attention: super::model::Q4Attention,
-    ffn_norm: RmsNorm<Wgpu>,
+    ffn_norm: RmsNorm<ActiveBackend>,
     pub(crate) ffn: super::model::Q4FeedForward,
 }
 
 impl Q4TtsDecoderLayer {
     /// Create a new Q4 TTS decoder layer.
     pub fn new(
-        attention_norm: RmsNorm<Wgpu>,
+        attention_norm: RmsNorm<ActiveBackend>,
         attention: super::model::Q4Attention,
-        ffn_norm: RmsNorm<Wgpu>,
+        ffn_norm: RmsNorm<ActiveBackend>,
         ffn: super::model::Q4FeedForward,
     ) -> Self {
         Self {
@@ -49,7 +49,7 @@ impl Q4TtsDecoderLayer {
     }
 
     /// Forward pass with causal attention.
-    pub fn forward(&self, x: Tensor<Wgpu, 3>, rope: &RoPE<Wgpu>, offset: usize) -> Result<Tensor<Wgpu, 3>, String> {
+    pub fn forward(&self, x: Tensor<ActiveBackend, 3>, rope: &RoPE<ActiveBackend>, offset: usize) -> Result<Tensor<ActiveBackend, 3>, String> {
         let residual = x.clone();
         let x = self.attention_norm.forward(x);
         let x = self.attention.forward(x, rope, offset, true)?;
@@ -64,10 +64,10 @@ impl Q4TtsDecoderLayer {
     /// Forward pass with KV cache.
     pub fn forward_with_cache(
         &self,
-        x: Tensor<Wgpu, 3>,
-        rope: &RoPE<Wgpu>,
-        cache: &mut KVCache<Wgpu>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        x: Tensor<ActiveBackend, 3>,
+        rope: &RoPE<ActiveBackend>,
+        cache: &mut KVCache<ActiveBackend>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let residual = x.clone();
         let x = self.attention_norm.forward(x);
         let x = self.attention.forward_with_cache(x, rope, cache, true)?;
@@ -91,13 +91,13 @@ impl Q4TtsDecoderLayer {
 /// audio codebook embeddings, and final RMSNorm.
 pub struct Q4TtsBackbone {
     layers: Vec<Q4TtsDecoderLayer>,
-    norm: RmsNorm<Wgpu>,
+    norm: RmsNorm<ActiveBackend>,
     tok_embeddings: TokEmbedStore,
-    audio_codebook_embeddings: Tensor<Wgpu, 2>,
-    rope: RoPE<Wgpu>,
+    audio_codebook_embeddings: Tensor<ActiveBackend, 2>,
+    rope: RoPE<ActiveBackend>,
     config: TtsBackboneConfig,
     d_model: usize,
-    device: WgpuDevice,
+    device: ActiveDevice,
 }
 
 impl Q4TtsBackbone {
@@ -105,12 +105,12 @@ impl Q4TtsBackbone {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         layers: Vec<Q4TtsDecoderLayer>,
-        norm: RmsNorm<Wgpu>,
+        norm: RmsNorm<ActiveBackend>,
         tok_embeddings: TokEmbedStore,
-        audio_codebook_embeddings: Tensor<Wgpu, 2>,
-        rope: RoPE<Wgpu>,
+        audio_codebook_embeddings: Tensor<ActiveBackend, 2>,
+        rope: RoPE<ActiveBackend>,
         config: TtsBackboneConfig,
-        device: WgpuDevice,
+        device: ActiveDevice,
     ) -> Self {
         let d_model = config.dim;
         Self {
@@ -126,10 +126,10 @@ impl Q4TtsBackbone {
     }
 
     /// Embed token IDs from a CPU slice — avoids GPU readback (safe on WASM).
-    pub fn embed_tokens_from_ids(&self, ids: &[i32], batch: usize, seq: usize) -> Tensor<Wgpu, 3> {
+    pub fn embed_tokens_from_ids(&self, ids: &[i32], batch: usize, seq: usize) -> Tensor<ActiveBackend, 3> {
         match &self.tok_embeddings {
             TokEmbedStore::F32(embed) => {
-                let id_tensor = Tensor::<Wgpu, 2, Int>::from_data(
+                let id_tensor = Tensor::<ActiveBackend, 2, Int>::from_data(
                     TensorData::new(ids.to_vec(), [batch, seq]),
                     &self.device,
                 );
@@ -150,7 +150,7 @@ impl Q4TtsBackbone {
         ids: &[i32],
         batch: usize,
         seq: usize,
-    ) -> Tensor<Wgpu, 3> {
+    ) -> Tensor<ActiveBackend, 3> {
         let blocks_per_row = self.d_model / 32;
         let bytes_per_row = blocks_per_row * 18;
         let mut output = vec![0.0f32; ids.len() * self.d_model];
@@ -181,7 +181,7 @@ impl Q4TtsBackbone {
     }
 
     /// Compute logits from hidden states (LM head with tied embeddings).
-    pub fn lm_head(&self, hidden_states: Tensor<Wgpu, 3>) -> Tensor<Wgpu, 3> {
+    pub fn lm_head(&self, hidden_states: Tensor<ActiveBackend, 3>) -> Tensor<ActiveBackend, 3> {
         match &self.tok_embeddings {
             TokEmbedStore::F32(embed) => {
                 let [batch, seq, _] = hidden_states.dims();
@@ -198,9 +198,9 @@ impl Q4TtsBackbone {
     /// Forward pass with KV cache.
     pub fn forward_with_cache(
         &self,
-        x: Tensor<Wgpu, 3>,
-        caches: &mut LayerCaches<Wgpu>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        x: Tensor<ActiveBackend, 3>,
+        caches: &mut LayerCaches<ActiveBackend>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let mut x = x;
         for (i, layer) in self.layers.iter().enumerate() {
             if let Some(cache) = caches.get_mut(i) {
@@ -214,7 +214,7 @@ impl Q4TtsBackbone {
     ///
     /// Pre-allocates GPU buffers for max_seq tokens, avoiding per-token
     /// GPU allocations during the decode loop.
-    pub fn create_cache(&self, max_seq: usize) -> LayerCaches<Wgpu> {
+    pub fn create_cache(&self, max_seq: usize) -> LayerCaches<ActiveBackend> {
         LayerCaches::new_preallocated(
             self.layers.len(),
             1, // batch_size
@@ -254,7 +254,7 @@ impl Q4TtsBackbone {
     }
 
     /// Access audio codebook embeddings.
-    pub fn audio_codebook_embeddings(&self) -> &Tensor<Wgpu, 2> {
+    pub fn audio_codebook_embeddings(&self) -> &Tensor<ActiveBackend, 2> {
         &self.audio_codebook_embeddings
     }
 
@@ -264,7 +264,7 @@ impl Q4TtsBackbone {
     }
 
     /// Access device.
-    pub fn device(&self) -> &WgpuDevice {
+    pub fn device(&self) -> &ActiveDevice {
         &self.device
     }
 
@@ -283,9 +283,9 @@ impl Q4TtsBackbone {
     /// Vector of generated frames (semantic index + 36 acoustic levels per frame).
     pub async fn generate_async(
         &self,
-        input_sequence: Tensor<Wgpu, 3>,
+        input_sequence: Tensor<ActiveBackend, 3>,
         fm: &Q4FmTransformer,
-        codebook: &crate::tts::embeddings::AudioCodebookEmbeddings<Wgpu>,
+        codebook: &crate::tts::embeddings::AudioCodebookEmbeddings<ActiveBackend>,
         max_frames: usize,
     ) -> Result<Vec<crate::tts::backbone::GeneratedFrame>, String> {
         use crate::tts::backbone::GeneratedFrame;
@@ -310,7 +310,7 @@ impl Q4TtsBackbone {
             let semantic_logits = fm.semantic_logits(h.clone())?;
             let semantic_idx_f32 = semantic_logits.argmax(1).float(); // [1, 1] as f32
 
-            let noise: Tensor<Wgpu, 2> = Tensor::random(
+            let noise: Tensor<ActiveBackend, 2> = Tensor::random(
                 [1, acoustic_dim],
                 burn::tensor::Distribution::Normal(0.0, 1.0),
                 &self.device,
@@ -320,7 +320,7 @@ impl Q4TtsBackbone {
 
             // Fused readback: concat [semantic_idx(1), acoustic(36)] → single transfer
             let combined = Tensor::cat(vec![semantic_idx_f32, acoustic_indices], 1); // [1, 37]
-            let combined_data = Tensor::<Wgpu, 2>::into_data_async(combined)
+            let combined_data = Tensor::<ActiveBackend, 2>::into_data_async(combined)
                 .await
                 .map_err(|e| format!("Failed to read combined data: {e}"))?;
             let combined_slice = combined_data
@@ -366,9 +366,9 @@ impl Q4TtsBackbone {
     /// Returns the number of frames generated.
     pub async fn generate_with_callback<F>(
         &self,
-        input_sequence: Tensor<Wgpu, 3>,
+        input_sequence: Tensor<ActiveBackend, 3>,
         fm: &Q4FmTransformer,
-        codebook: &crate::tts::embeddings::AudioCodebookEmbeddings<Wgpu>,
+        codebook: &crate::tts::embeddings::AudioCodebookEmbeddings<ActiveBackend>,
         max_frames: usize,
         mut on_frame: F,
     ) -> Result<u32, String>
@@ -391,7 +391,7 @@ impl Q4TtsBackbone {
             let semantic_logits = fm.semantic_logits(h.clone())?;
             let semantic_idx_f32 = semantic_logits.argmax(1).float();
 
-            let noise: Tensor<Wgpu, 2> = Tensor::random(
+            let noise: Tensor<ActiveBackend, 2> = Tensor::random(
                 [1, acoustic_dim],
                 burn::tensor::Distribution::Normal(0.0, 1.0),
                 &self.device,
@@ -400,7 +400,7 @@ impl Q4TtsBackbone {
             let acoustic_indices = Fsq::quantize(acoustic_raw);
 
             let combined = Tensor::cat(vec![semantic_idx_f32, acoustic_indices], 1);
-            let combined_data = Tensor::<Wgpu, 2>::into_data_async(combined)
+            let combined_data = Tensor::<ActiveBackend, 2>::into_data_async(combined)
                 .await
                 .map_err(|e| format!("Failed to read combined data: {e}"))?;
             let combined_slice = combined_data
@@ -445,18 +445,18 @@ impl Q4TtsBackbone {
 ///
 /// Same structure as Q4EncoderLayer but uses non-causal attention.
 pub struct Q4FmLayer {
-    attention_norm: RmsNorm<Wgpu>,
+    attention_norm: RmsNorm<ActiveBackend>,
     attention: super::model::Q4Attention,
-    ffn_norm: RmsNorm<Wgpu>,
+    ffn_norm: RmsNorm<ActiveBackend>,
     ffn: super::model::Q4FeedForward,
 }
 
 impl Q4FmLayer {
     /// Create a new Q4 FM layer.
     pub fn new(
-        attention_norm: RmsNorm<Wgpu>,
+        attention_norm: RmsNorm<ActiveBackend>,
         attention: super::model::Q4Attention,
-        ffn_norm: RmsNorm<Wgpu>,
+        ffn_norm: RmsNorm<ActiveBackend>,
         ffn: super::model::Q4FeedForward,
     ) -> Self {
         Self {
@@ -468,7 +468,7 @@ impl Q4FmLayer {
     }
 
     /// Forward pass with non-causal (bidirectional) attention.
-    pub fn forward(&self, x: Tensor<Wgpu, 3>, rope: &RoPE<Wgpu>, offset: usize) -> Result<Tensor<Wgpu, 3>, String> {
+    pub fn forward(&self, x: Tensor<ActiveBackend, 3>, rope: &RoPE<ActiveBackend>, offset: usize) -> Result<Tensor<ActiveBackend, 3>, String> {
         let residual = x.clone();
         let x = self.attention_norm.forward(x);
         let x = self.attention.forward(x, rope, offset, false)?;
@@ -491,14 +491,14 @@ impl Q4FmLayer {
 /// Euler ODE steps with classifier-free guidance.
 pub struct Q4FmTransformer {
     time_embedding: TimeEmbedding,
-    rope: RoPE<Wgpu>,
+    rope: RoPE<ActiveBackend>,
     layers: Vec<Q4FmLayer>,
     llm_projection: Q4Linear,
     time_projection: Q4Linear,
-    input_projection: Linear<Wgpu>,
+    input_projection: Linear<ActiveBackend>,
     semantic_codebook_output: Q4Linear,
-    acoustic_codebook_output: Linear<Wgpu>,
-    norm: RmsNorm<Wgpu>,
+    acoustic_codebook_output: Linear<ActiveBackend>,
+    norm: RmsNorm<ActiveBackend>,
     config: FmTransformerConfig,
 }
 
@@ -507,14 +507,14 @@ impl Q4FmTransformer {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         time_embedding: TimeEmbedding,
-        rope: RoPE<Wgpu>,
+        rope: RoPE<ActiveBackend>,
         layers: Vec<Q4FmLayer>,
         llm_projection: Q4Linear,
         time_projection: Q4Linear,
-        input_projection: Linear<Wgpu>,
+        input_projection: Linear<ActiveBackend>,
         semantic_codebook_output: Q4Linear,
-        acoustic_codebook_output: Linear<Wgpu>,
-        norm: RmsNorm<Wgpu>,
+        acoustic_codebook_output: Linear<ActiveBackend>,
+        norm: RmsNorm<ActiveBackend>,
         config: FmTransformerConfig,
     ) -> Self {
         Self {
@@ -536,7 +536,7 @@ impl Q4FmTransformer {
     /// Returns logits of shape [batch, semantic_output_size] with masking:
     /// - Index 0 (EMPTY_AUDIO) masked to -inf
     /// - Indices >= (2 + 8192) masked to -inf (beyond valid semantic range)
-    pub fn semantic_logits(&self, h: Tensor<Wgpu, 3>) -> Result<Tensor<Wgpu, 2>, String> {
+    pub fn semantic_logits(&self, h: Tensor<ActiveBackend, 3>) -> Result<Tensor<ActiveBackend, 2>, String> {
         let [batch, _seq, _dim] = h.dims();
         let device = h.device();
 
@@ -548,14 +548,14 @@ impl Q4FmTransformer {
 
     /// Pre-computed semantic logit mask (cached on first call via lazy evaluation).
     /// Masks EMPTY_AUDIO (idx 0) and invalid indices >= 8194 to -inf.
-    fn semantic_mask(&self, device: WgpuDevice) -> Tensor<Wgpu, 2> {
+    fn semantic_mask(&self, device: ActiveDevice) -> Tensor<ActiveBackend, 2> {
         let mut mask_data = vec![0.0f32; self.config.semantic_output_size];
         mask_data[0] = f32::NEG_INFINITY;
         let valid_end = 2 + 8192;
         for v in mask_data.iter_mut().skip(valid_end) {
             *v = f32::NEG_INFINITY;
         }
-        let mask: Tensor<Wgpu, 1> = Tensor::from_floats(mask_data.as_slice(), &device);
+        let mask: Tensor<ActiveBackend, 1> = Tensor::from_floats(mask_data.as_slice(), &device);
         mask.unsqueeze_dim::<2>(0)
     }
 
@@ -570,10 +570,10 @@ impl Q4FmTransformer {
     /// and projects via `acoustic_codebook_output` → velocity in R^36.
     pub fn predict_velocity(
         &self,
-        h: Tensor<Wgpu, 3>,
-        x_t: Tensor<Wgpu, 3>,
+        h: Tensor<ActiveBackend, 3>,
+        x_t: Tensor<ActiveBackend, 3>,
         t: f32,
-    ) -> Result<Tensor<Wgpu, 2>, String> {
+    ) -> Result<Tensor<ActiveBackend, 2>, String> {
         let device = h.device();
 
         // Project inputs to FM dim
@@ -612,14 +612,14 @@ impl Q4FmTransformer {
     ///
     /// Uses batched CFG: runs conditional + unconditional passes as batch=2
     /// in a single forward pass, halving the number of GPU kernel launches.
-    pub fn euler_ode_solve(&self, h: Tensor<Wgpu, 3>, noise: Tensor<Wgpu, 2>) -> Result<Tensor<Wgpu, 2>, String> {
+    pub fn euler_ode_solve(&self, h: Tensor<ActiveBackend, 3>, noise: Tensor<ActiveBackend, 2>) -> Result<Tensor<ActiveBackend, 2>, String> {
         let device = h.device();
         let n_points = self.config.euler_steps;
         let alpha = self.config.cfg_alpha;
 
         // Pre-build batched hidden state: [2, 1, dim] = [h_cond, h_uncond=zeros]
         let [batch, seq, dim] = h.dims();
-        let h_uncond: Tensor<Wgpu, 3> = Tensor::zeros([batch, seq, dim], &device);
+        let h_uncond: Tensor<ActiveBackend, 3> = Tensor::zeros([batch, seq, dim], &device);
         let h_batched = Tensor::cat(vec![h, h_uncond], 0); // [2, 1, dim]
 
         let mut x_t = noise;
@@ -674,7 +674,7 @@ mod tests {
         n_heads: usize,
         n_kv_heads: usize,
         head_dim: usize,
-        device: &WgpuDevice,
+        device: &ActiveDevice,
     ) -> super::super::model::Q4Attention {
         use super::super::model::Q4Attention;
         let wq = make_test_q4_linear(dim, dim, device);
@@ -687,7 +687,7 @@ mod tests {
     fn make_test_q4_ffn(
         dim: usize,
         ffn_dim: usize,
-        device: &WgpuDevice,
+        device: &ActiveDevice,
     ) -> super::super::model::Q4FeedForward {
         use super::super::model::Q4FeedForward;
         let w1 = make_test_q4_linear(ffn_dim, dim, device);
@@ -700,7 +700,7 @@ mod tests {
     fn make_test_q4_linear(
         out_features: usize,
         in_features: usize,
-        device: &WgpuDevice,
+        device: &ActiveDevice,
     ) -> Q4Linear {
         // Round up to nearest multiple of 32 for Q4 block alignment
         let out_aligned = ((out_features + 31) / 32) * 32;
@@ -717,10 +717,10 @@ mod tests {
         Q4Linear::new(q4, None)
     }
 
-    fn make_test_rms_norm(dim: usize, device: &WgpuDevice) -> RmsNorm<Wgpu> {
+    fn make_test_rms_norm(dim: usize, device: &ActiveDevice) -> RmsNorm<ActiveBackend> {
         RmsNorm {
             weight: burn::nn::RmsNorm {
-                gamma: Param::initialized(ParamId::new(), Tensor::<Wgpu, 1>::ones([dim], device)),
+                gamma: Param::initialized(ParamId::new(), Tensor::<ActiveBackend, 1>::ones([dim], device)),
                 epsilon: 1e-5,
             },
         }
@@ -728,7 +728,7 @@ mod tests {
 
     #[test]
     fn test_q4_tts_decoder_layer_shape() {
-        let device = WgpuDevice::default();
+        let device = ActiveDevice::default();
         let dim = 64;
         let n_heads = 4;
         let n_kv_heads = 2;
@@ -746,14 +746,14 @@ mod tests {
             .with_theta(1_000_000.0)
             .init(&device);
 
-        let x = Tensor::<Wgpu, 3>::zeros([1, 10, dim], &device);
+        let x = Tensor::<ActiveBackend, 3>::zeros([1, 10, dim], &device);
         let out = layer.forward(x, &rope, 0).unwrap();
         assert_eq!(out.dims(), [1, 10, dim]);
     }
 
     #[test]
     fn test_q4_fm_layer_shape() {
-        let device = WgpuDevice::default();
+        let device = ActiveDevice::default();
         let dim = 64;
         let n_heads = 4;
         let n_kv_heads = 2;
@@ -772,7 +772,7 @@ mod tests {
             .init(&device);
 
         // FM input is always 3 tokens
-        let x = Tensor::<Wgpu, 3>::zeros([1, 3, dim], &device);
+        let x = Tensor::<ActiveBackend, 3>::zeros([1, 3, dim], &device);
         let out = layer.forward(x, &rope, 0).unwrap();
         assert_eq!(out.dims(), [1, 3, dim]);
     }

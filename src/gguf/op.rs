@@ -76,13 +76,14 @@ impl KernelSource for Q4MatmulNaiveKernel {
     }
 }
 
-/// Fused Q4_0 dequant+matmul on GPU.
+/// Fused Q4_0 dequant+matmul on GPU (wgpu path).
 ///
 /// Computes `output[B, M, N] = input[B, M, K] × weights[N, K]^T` where weights
 /// are stored in Q4_0 block format on the GPU with shape `[N, K]`
 /// (out_features, in_features), matching PyTorch/GGUF convention.
 /// Dequantization happens inside the compute shader — no intermediate
 /// full-precision weight buffer is created.
+#[cfg(feature = "wgpu")]
 pub fn q4_matmul(input: Tensor<Wgpu, 3>, weights: &Q4Tensor) -> Result<Tensor<Wgpu, 3>, String> {
     // Convert Tensor → CubeTensor and ensure contiguous layout
     let cube_input: CubeTensor<WgpuRuntime> = input.into_primitive().tensor();
@@ -203,4 +204,28 @@ fn dispatch_naive(
             bindings,
         )
         .map_err(|e| format!("Q4 naive matmul kernel launch failed: {e}"))
+}
+
+/// Q4_0 dequant+matmul for non-wgpu backends (cuda/metal/rocm).
+///
+/// Dequantizes Q4_0 weights to f32 on CPU, uploads to the target backend,
+/// then uses Burn's native matmul (cuBLAS on CUDA, MPSGraph on Metal).
+/// For wgpu backends use the WGSL shader variant above which dequantizes on GPU.
+#[cfg(not(feature = "wgpu"))]
+pub fn q4_matmul<B: burn::tensor::backend::Backend>(
+    input: burn::tensor::Tensor<B, 3>,
+    weights: &Q4Tensor,
+    device: &B::Device,
+) -> Result<burn::tensor::Tensor<B, 3>, String> {
+    let [n, k] = weights.shape();
+    let dequantized = weights.dequantize_f32();
+    let weight_tensor = burn::tensor::Tensor::<B, 2>::from_data(
+        burn::tensor::TensorData::new(dequantized, [n, k]),
+        device,
+    );
+    let dims = input.dims();
+    let (b, m) = (dims[0], dims[1]);
+    let input_2d = input.reshape([b * m, k]);
+    let output_2d = input_2d.matmul(weight_tensor.transpose());
+    Ok(output_2d.reshape([b, m, n]))
 }
