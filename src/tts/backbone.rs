@@ -363,6 +363,83 @@ impl<B: Backend> TtsBackbone<B> {
 
         frames
     }
+
+    /// Autoregressive generation with a per-frame callback.
+    ///
+    /// Identical to `generate` but invokes `on_frame` for each frame as it is
+    /// produced rather than collecting into a Vec. Return `false` from the callback
+    /// to stop generation early.
+    ///
+    /// Returns the number of frames generated.
+    pub fn generate_with_callback<F>(
+        &self,
+        input_sequence: Tensor<B, 3>,
+        fm: &FmTransformer<B>,
+        codebook: &AudioCodebookEmbeddings<B>,
+        max_frames: usize,
+        device: &B::Device,
+        mut on_frame: F,
+    ) -> u32
+    where
+        F: FnMut(&GeneratedFrame) -> bool,
+    {
+        use crate::tts::codec::quantizer::Fsq;
+
+        let acoustic_dim = fm.config().acoustic_dim;
+        let mut caches = self.create_cache();
+        let mut frame_count = 0u32;
+
+        let prefill_out = self.forward_with_cache(input_sequence, &mut caches);
+        let [batch, seq_len, dim] = prefill_out.dims();
+        let mut h = prefill_out.slice([0..batch, (seq_len - 1)..seq_len, 0..dim]);
+
+        for frame_idx in 0..max_frames {
+            let semantic_logits = fm.semantic_logits(h.clone());
+            let semantic_idx = semantic_logits.argmax(1);
+            let semantic_idx_val: i32 = semantic_idx.into_scalar().elem();
+            let semantic_idx_val = semantic_idx_val as usize;
+
+            tracing::debug!(
+                frame = frame_idx,
+                semantic_idx = semantic_idx_val,
+                "Generated semantic token"
+            );
+
+            if semantic_idx_val == 1 {
+                tracing::info!(frame = frame_idx, "END_AUDIO token detected, stopping");
+                break;
+            }
+
+            let noise: Tensor<B, 2> = Tensor::random(
+                [1, acoustic_dim],
+                burn::tensor::Distribution::Normal(0.0, 1.0),
+                device,
+            );
+            let acoustic_raw = fm.euler_ode_solve(h.clone(), noise);
+            let acoustic_indices = Fsq::quantize(acoustic_raw);
+            let acoustic_data = acoustic_indices.to_data();
+            let acoustic_slice = acoustic_data.as_slice::<f32>().unwrap();
+
+            let mut acoustic_levels = [0usize; 36];
+            for (i, &v) in acoustic_slice.iter().enumerate().take(36) {
+                acoustic_levels[i] = v as usize;
+            }
+
+            let raw_semantic = semantic_idx_val.saturating_sub(2);
+            let frame = GeneratedFrame { semantic_idx: raw_semantic, acoustic_levels };
+
+            frame_count += 1;
+            if !on_frame(&frame) {
+                break;
+            }
+
+            let frame_embed = codebook.embed_frame(raw_semantic, &acoustic_levels);
+            let next_input = frame_embed.unsqueeze_dim::<3>(0);
+            h = self.forward_with_cache(next_input, &mut caches);
+        }
+
+        frame_count
+    }
 }
 
 /// A single generated audio frame from autoregressive decoding.

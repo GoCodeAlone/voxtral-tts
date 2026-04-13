@@ -180,3 +180,89 @@ fn test_q4_tts_load_and_generate() {
 
     println!("Q4 TTS E2E test PASSED");
 }
+
+#[test]
+fn test_generate_callback() {
+    if !models_available() {
+        println!("Skipping: model files not found");
+        return;
+    }
+
+    let device = burn::backend::wgpu::WgpuDevice::default();
+    let mut loader = voxtral_tts::gguf::Q4TtsModelLoader::from_file(std::path::Path::new(
+        "models/voxtral-tts-q4.gguf",
+    ))
+    .expect("Failed to open GGUF");
+    let (backbone, fm, _codec) = loader.load(&device).expect("Failed to load model");
+
+    let voice_bytes =
+        std::fs::read("models/voxtral-tts/voice_embedding/casual_female.safetensors").unwrap();
+    let voice_embed: Tensor<Backend, 2> =
+        voxtral_tts::tts::voice::load_voice_from_bytes(&voice_bytes, 3072, &device).unwrap();
+    let tokenizer_json = std::fs::read_to_string("models/voxtral-tts/tekken.json").unwrap();
+    let tokenizer =
+        voxtral_tts::tokenizer::TekkenEncoder::from_json(&tokenizer_json).unwrap();
+
+    let text = "Hi";
+    let token_ids = tokenizer.encode(text);
+    let special = voxtral_tts::tts::config::TtsSpecialTokens::default();
+    let bos = backbone.embed_tokens_from_ids(&[special.bos_token_id as i32], 1, 1);
+    let begin_audio = backbone.embed_tokens_from_ids(&[special.begin_audio_token_id as i32], 1, 1);
+    let next_audio_text =
+        backbone.embed_tokens_from_ids(&[special.next_audio_text_token_id as i32], 1, 1);
+    let repeat_audio_text =
+        backbone.embed_tokens_from_ids(&[special.repeat_audio_text_token_id as i32], 1, 1);
+    let text_ids_i32: Vec<i32> = token_ids.iter().map(|&id| id as i32).collect();
+    let text_embeds = backbone.embed_tokens_from_ids(&text_ids_i32, 1, text_ids_i32.len());
+    let voice_3d = voice_embed.unsqueeze_dim::<3>(0);
+    let input_sequence = Tensor::cat(
+        vec![bos, begin_audio.clone(), voice_3d, next_audio_text, text_embeds, repeat_audio_text, begin_audio],
+        1,
+    );
+
+    let codebook_layout = voxtral_tts::tts::config::AudioCodebookLayout::default();
+    let codebook = voxtral_tts::tts::embeddings::AudioCodebookEmbeddings::new(
+        backbone.audio_codebook_embeddings().clone(),
+        codebook_layout,
+    );
+
+    let mut received_frames: Vec<usize> = Vec::new(); // frame indices
+    let callback_frame_count = pollster::block_on(backbone.generate_with_callback(
+        input_sequence.clone(),
+        &fm,
+        &codebook,
+        5, // max 5 frames
+        |frame| {
+            let idx = received_frames.len() + 1;
+            println!("frame {idx}: semantic={}", frame.semantic_idx);
+            received_frames.push(frame.semantic_idx);
+            true
+        },
+    ))
+    .expect("generate_with_callback failed");
+
+    println!(
+        "Callback received {} frames, generate returned {}",
+        received_frames.len(),
+        callback_frame_count
+    );
+    assert_eq!(received_frames.len() as u32, callback_frame_count);
+    assert!(callback_frame_count > 0, "Should generate at least 1 frame");
+
+    // Verify early termination: callback returns false after 2 frames
+    let mut early_count = 0u32;
+    let stopped = pollster::block_on(backbone.generate_with_callback(
+        input_sequence,
+        &fm,
+        &codebook,
+        100,
+        |_frame| {
+            early_count += 1;
+            early_count < 2 // stop after 2nd frame
+        },
+    ))
+    .expect("early termination test failed");
+    assert_eq!(stopped, 2, "Expected exactly 2 frames before early stop");
+
+    println!("test_generate_callback PASSED");
+}

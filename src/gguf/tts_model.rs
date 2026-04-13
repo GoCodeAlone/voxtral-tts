@@ -356,6 +356,84 @@ impl Q4TtsBackbone {
 
         Ok(frames)
     }
+
+    /// Autoregressive generation with a per-frame callback.
+    ///
+    /// Identical to `generate_async` but invokes `on_frame` for each frame as it
+    /// is produced. Return `false` from the callback to stop early.
+    ///
+    /// Returns the number of frames generated.
+    pub async fn generate_with_callback<F>(
+        &self,
+        input_sequence: Tensor<Wgpu, 3>,
+        fm: &Q4FmTransformer,
+        codebook: &crate::tts::embeddings::AudioCodebookEmbeddings<Wgpu>,
+        max_frames: usize,
+        mut on_frame: F,
+    ) -> Result<u32, String>
+    where
+        F: FnMut(&crate::tts::backbone::GeneratedFrame) -> bool,
+    {
+        use crate::tts::backbone::GeneratedFrame;
+        use crate::tts::codec::quantizer::Fsq;
+
+        let acoustic_dim = fm.config().acoustic_dim;
+        let [_, input_seq_len, _] = input_sequence.dims();
+        let mut caches = self.create_cache(input_seq_len + max_frames);
+        let mut frame_count = 0u32;
+
+        let prefill_out = self.forward_with_cache(input_sequence, &mut caches);
+        let [batch, seq_len, dim] = prefill_out.dims();
+        let mut h = prefill_out.slice([0..batch, (seq_len - 1)..seq_len, 0..dim]);
+
+        for frame_idx in 0..max_frames {
+            let semantic_logits = fm.semantic_logits(h.clone());
+            let semantic_idx_f32 = semantic_logits.argmax(1).float();
+
+            let noise: Tensor<Wgpu, 2> = Tensor::random(
+                [1, acoustic_dim],
+                burn::tensor::Distribution::Normal(0.0, 1.0),
+                &self.device,
+            );
+            let acoustic_raw = fm.euler_ode_solve(h.clone(), noise);
+            let acoustic_indices = Fsq::quantize(acoustic_raw);
+
+            let combined = Tensor::cat(vec![semantic_idx_f32, acoustic_indices], 1);
+            let combined_data = Tensor::<Wgpu, 2>::into_data_async(combined)
+                .await
+                .map_err(|e| format!("Failed to read combined data: {e}"))?;
+            let combined_slice = combined_data
+                .as_slice::<f32>()
+                .map_err(|e| format!("Failed to extract combined data: {e}"))?;
+            let semantic_idx_val = combined_slice[0] as usize;
+
+            if semantic_idx_val == 1 {
+                tracing::info!(frame = frame_idx, "END_AUDIO token detected, stopping");
+                break;
+            }
+
+            let acoustic_slice = &combined_slice[1..37];
+            let mut acoustic_levels = [0usize; 36];
+            for (i, &v) in acoustic_slice.iter().enumerate().take(36) {
+                acoustic_levels[i] = v as usize;
+            }
+
+            let raw_semantic = semantic_idx_val.saturating_sub(2);
+            let frame = GeneratedFrame { semantic_idx: raw_semantic, acoustic_levels };
+
+            frame_count += 1;
+            if !on_frame(&frame) {
+                break;
+            }
+
+            let frame_embed = codebook.embed_frame(raw_semantic, &acoustic_levels);
+            let next_input = frame_embed.unsqueeze_dim::<3>(0);
+            h = self.forward_with_cache(next_input, &mut caches);
+        }
+
+        tracing::info!(frames = frame_count, "Q4 TTS generate_with_callback complete");
+        Ok(frame_count)
+    }
 }
 
 // ---------------------------------------------------------------------------
