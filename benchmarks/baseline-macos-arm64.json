@@ -5,6 +5,30 @@
   "euler_steps": 4,
   "phrases": 10,
   "wgpu": { "rtf_min": 5.409, "rtf_avg": 6.630, "rtf_max": 9.715, "rtf_p99": 9.715 },
-  "metal": { "rtf_min": 0.0, "rtf_avg": 0.0, "rtf_max": 0.0, "rtf_p99": 0.0 },
-  "note": "wgpu measured 2026-04-13 on Apple M-series, --profile bench (no LTO), euler_steps=4, 10 phrases"
+  "metal": {
+    "status": "compilation_failed",
+    "rtf_min": null,
+    "rtf_avg": null,
+    "rtf_max": null,
+    "rtf_p99": null,
+    "error_count": 73,
+    "root_cause": "Model structs are hardcoded to Wgpu backend (e.g. `rope: RoPE<Wgpu>`, `norm: RmsNorm<Wgpu>`, `tok_embeddings: Tensor<Wgpu, 2>`). Metal's CubeBackend uses u32 for its integer element type parameter; wgpu uses u8. The mismatch propagates to every struct field and method signature that references these types. Fix requires making all model structs generic over B: Backend and replacing Wgpu type annotations with the generic B.",
+    "error_breakdown": {
+      "E0308_mismatched_types": 46,
+      "E0599_no_method_weights_on_Q4Linear": 10,
+      "E0061_wrong_arg_count": 12,
+      "E0277_trait_bound_ElementConversion": 4,
+      "E0308_match_arms_incompatible": 1
+    },
+    "fix_estimate": "Refactor all model structs in src/gguf/ to be generic over B: Backend. Medium effort — mechanical change but large surface area."
+  },
+  "metal_f16": {
+    "status": "blocked_by_metal_compilation_failure",
+    "rtf_min": null,
+    "rtf_avg": null,
+    "rtf_max": null,
+    "rtf_p99": null
+  },
+  "note": "wgpu measured 2026-04-13 on Apple M-series, --profile bench (no LTO), euler_steps=4, 10 phrases. Metal backend blocked by non-generic model structs — see metal.root_cause.",
+  "conclusion": "Metal benchmark cannot run until model structs are made generic over B: Backend. The wgpu WGSL shader path (RTF avg 6.63x) is currently the only working GPU path on macOS. Auto-disable threshold (5.0x) is NOT met — TTS remains disabled on this hardware until Metal is fixed or wgpu RTF improves."
 }
