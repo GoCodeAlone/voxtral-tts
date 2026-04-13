@@ -4,7 +4,7 @@
   "backend": "wgpu",
   "euler_steps": 4,
   "phrases": 10,
-  "wgpu": { "rtf_min": 0.0, "rtf_avg": 0.0, "rtf_max": 0.0, "rtf_p99": 0.0 },
+  "wgpu": { "rtf_min": 5.409, "rtf_avg": 6.630, "rtf_max": 9.715, "rtf_p99": 9.715 },
   "metal": { "rtf_min": 0.0, "rtf_avg": 0.0, "rtf_max": 0.0, "rtf_p99": 0.0 },
-  "note": "Pending: fill in after running release benchmark"
+  "note": "wgpu measured 2026-04-13 on Apple M-series, --profile bench (no LTO), euler_steps=4, 10 phrases"
 }
