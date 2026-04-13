@@ -1,229 +1,102 @@
-# Voxtral Mini 4B Realtime (Rust)
+# voxtral-tts
 
-[![HuggingFace ASR](https://img.shields.io/badge/%F0%9F%A4%97-ASR_Model-yellow)](https://huggingface.co/TrevorJS/voxtral-mini-realtime-gguf)
-[![HuggingFace TTS](https://img.shields.io/badge/%F0%9F%A4%97-TTS_Model-yellow)](https://huggingface.co/TrevorJS/voxtral-tts-q4-gguf)
-[![ASR Demo](https://img.shields.io/badge/%F0%9F%8E%99%EF%B8%8F-ASR_Demo-blue)](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime)
-[![TTS Demo](https://img.shields.io/badge/%F0%9F%94%8A-TTS_Demo-purple)](https://huggingface.co/spaces/TrevorJS/voxtral-4b-tts)
+**Streaming TTS lib crate for [Core Dump](https://github.com/GoCodeAlone/core-dump).**
 
-Streaming speech recognition and text-to-speech running natively and in the browser. A pure Rust implementation of Mistral's [Voxtral Mini 4B Realtime](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) (ASR) and [Voxtral 4B TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) models using the [Burn](https://burn.dev) ML framework.
+Forked from [TrevorS/voxtral-mini-realtime-rs](https://github.com/TrevorS/voxtral-mini-realtime-rs) — a pure-Rust implementation of Mistral's [Voxtral 4B TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) using the [Burn](https://burn.dev) ML framework with wgpu GPU acceleration.
 
-## Benchmarks
+## Why This Fork Exists
 
-NVIDIA DGX Spark (GB10, LPDDR5x).
+The upstream repo is a full-featured CLI application with ASR, TTS, WASM browser support, HuggingFace Hub downloads, and sharded model loading. Core Dump needs a focused **lib crate** optimized for real-time game dialogue — specifically:
 
-### ASR (Speech Recognition)
+1. **Streaming audio output** — the upstream collects all frames into a Vec, then writes a WAV file. This fork streams audio frame-by-frame through a ring buffer to cpal, so playback begins ~80ms after the first frame generates (on hardware with RTF < 1.0x).
 
-16s test audio, 3-run average:
+2. **No CLI, no browser, no downloads** — stripped the binary targets, clap/indicatif, WASM/wasm-bindgen, HuggingFace Hub fetching, and sharded model loading. Models ship via Steam depot.
 
-| Path | Encode | Decode | Total | RTF | Tok/s | Memory |
-|------|--------|--------|-------|-----|-------|--------|
-| **Q4 GGUF native** | 1021 ms | 5578 ms | 6629 ms | **0.416** | **19.4** | 703 MB |
-| BF16 native | 887 ms | 23689 ms | 24607 ms | 1.543 | 4.6 | 9.2 GB |
-| Q4 GGUF WASM | — | — | ~225 s | ~14.1 | ~0.5 | (browser) |
+3. **Ring buffer + cpal integration** — `AudioRingBuffer` with Mutex/Condvar backpressure feeds a persistent cpal output stream. The stream stays open across utterances (no per-call open/close overhead).
 
-- **8.49% WER** on FLEURS English (647 utterances), vs. Mistral's reported 4.90% at f32
+4. **Per-frame codec decode** — instead of batch-decoding all frames after generation, each frame is codec-decoded and pushed to the ring buffer immediately. This overlaps codec GPU work with backbone generation, resulting in ~1.3-1.5x faster total generation time.
 
-### TTS (Text-to-Speech)
+5. **RTF/TTFA instrumentation** — every `speak()` call measures Real-Time Factor (generation_ms / audio_duration_ms) and Time To First Audio. Used for hardware tier calibration — auto-disables TTS if RTF > 5.0x.
 
-"The quick brown fox jumps over the lazy dog" (9 tokens), casual_female voice:
+6. **High-level `TtsEngine` API** — single `speak(text, voice_id, config)` call that handles tokenization, voice embedding, backbone decode, codec synthesis, and audio output internally.
 
-| Path | Euler Steps | Gen Time | Audio | RTF | Model Size |
-|------|-------------|----------|-------|-----|------------|
-| **Q4 GGUF native** | 3 | 3.7s | 3.84s | **0.97** | 2.67 GB |
-| Q4 GGUF native | 4 | 5.0s | 4.96s | 1.01 | 2.67 GB |
-| BF16 native | 3 | 10.4s | 2.72s | 3.82 | ~8 GB |
-| BF16 native | 8 | 20.6s | 2.96s | 6.97 | ~8 GB |
-| Q4 GGUF WASM | 8 | 367s | 3.52s | 104 | 2.67 GB |
+## What Changed From Upstream
 
-- **RTF** < 1.0 means faster-than-real-time synthesis
-- Q4 at 3 Euler steps achieves **real-time** with perfect Whisper large-v3 transcription
-- Optimizations: batched CFG (2× → batch=2), fused QKV+gate/up projections, pre-allocated KV cache
-- Q4 model load: 3.9s native, 9.2s WASM (including shard download over localhost)
-- 20 preset voices across 9 languages. Use `--euler-steps` to tune speed/quality tradeoff
+| Component | Upstream | This Fork |
+|-----------|----------|-----------|
+| Crate type | Binary + lib | **Lib only** |
+| Audio output | Collect all → write WAV | **Frame-by-frame → ring buffer → cpal** |
+| Dependencies | clap, indicatif, wasm-bindgen, hub | **None of these** |
+| API | CLI flags | **`TtsEngine::speak()`** |
+| Codec decode | Batch after generation | **Per-frame, overlapped with generation** |
+| Timing | None | **RTF, TTFA, generation_ms** |
 
-### Architecture Notes
+## What's Preserved
 
-- Custom WGSL compute shaders with vectorized u32 reads and vec4 dot products
-- Dual-path kernel dispatch: shared-memory tiled kernel for single-token decode, naive kernel for multi-row encode/prefill
-- Q4 GGUF (2.5 GB ASR, 2.67 GB TTS) runs entirely client-side in a browser tab via WASM + WebGPU
-
-Try the demos: [ASR (speech-to-text)](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime) | [TTS (text-to-speech)](https://huggingface.co/spaces/TrevorJS/voxtral-4b-tts)
+- All 3 pipeline stages: Q4 Ministral backbone → flow-matching transformer → codec decoder
+- Q4 GGUF model loading (`Q4TtsModelLoader`)
+- Tekken tokenizer (`TekkenEncoder`)
+- Voice preset loading from SafeTensors
+- Burn ML wgpu backend for GPU compute
+- Custom WGSL compute shaders for Q4 inference
+- 235 unit/integration tests (all passing)
 
 ## Quick Start
 
-### Native CLI
+```rust
+use voxtral_tts::{TtsEngine, SpeakConfig};
+use std::path::Path;
 
-```bash
-# Download ASR model weights (~9 GB BF16 or ~2.5 GB Q4)
-uv run --with huggingface_hub \
-  hf download mistralai/Voxtral-Mini-4B-Realtime-2602 --local-dir models/voxtral
-uv run --with huggingface_hub \
-  hf download TrevorJS/voxtral-mini-realtime-gguf --local-dir models/
+// Load from model directory containing:
+//   voxtral-tts-q4.gguf, tekken.json, voice_embedding/*.safetensors
+let engine = TtsEngine::load(Path::new("/path/to/models/voice"))?;
 
-# Transcribe audio (BF16 or Q4)
-cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
-  transcribe --audio audio.wav --model models/voxtral
-cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
-  transcribe --audio audio.wav --gguf models/voxtral-q4.gguf
+// Speak — audio streams to default output device immediately
+let result = engine.speak("Hello, I am VERA.", "casual_female", &SpeakConfig::default())?;
+
+println!("{}ms audio in {}ms (RTF={:.2}x, TTFA={}ms)",
+    result.duration_ms, result.generation_ms, result.rtf, result.ttfa_ms);
 ```
 
-### Browser Demo
+## Configuration
 
-```bash
-# Build WASM package
-wasm-pack build --target web --no-default-features --features wasm
-
-# Generate self-signed cert (WebGPU requires secure context)
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-  -keyout /tmp/voxtral-key.pem -out /tmp/voxtral-cert.pem \
-  -days 7 -nodes -subj "/CN=localhost"
-
-# Start dev server
-bun serve.mjs
+```rust
+let config = SpeakConfig {
+    euler_steps: 3,     // 3=fast, 4=balanced, 8=quality
+    use_gpu: true,      // wgpu Metal/Vulkan/WebGPU
+    max_frames: 2000,   // safety cap (~160s of audio)
+};
 ```
 
-Open `https://localhost:8443`, accept the certificate, and click **Load from Server** to download the model shards. Record from your microphone or upload a WAV file to transcribe.
+## Benchmarks
 
-Hosted demos: [ASR on HuggingFace Spaces](https://huggingface.co/spaces/TrevorJS/voxtral-mini-realtime) | [TTS on HuggingFace Spaces](https://huggingface.co/spaces/TrevorJS/voxtral-4b-tts)
+NVIDIA DGX Spark (GB10, LPDDR5x), from upstream:
 
-### Text-to-Speech
+| Euler Steps | Gen Time | Audio | RTF | Model Size |
+|-------------|----------|-------|-----|------------|
+| 3 | 3.7s | 3.84s | **0.97x** | 2.67 GB |
+| 4 | 5.0s | 4.96s | 1.01x | 2.67 GB |
+| 8 | 20.6s | 2.96s | 6.97x | ~8 GB (BF16) |
 
-```bash
-# Download TTS model weights (~8 GB BF16 or ~2.67 GB Q4)
-uv run --with huggingface_hub \
-  hf download mistralai/Voxtral-4B-TTS-2603 --local-dir models/voxtral-tts
-uv run --with huggingface_hub \
-  hf download TrevorJS/voxtral-tts-q4-gguf voxtral-tts-q4.gguf --local-dir models
-
-# Synthesize speech (BF16 or Q4)
-cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
-  speak --text "Hello world" --voice casual_female
-cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
-  speak --text "Hello world" --voice casual_female --gguf models/voxtral-tts-q4.gguf
-
-# Real-time with 3 Euler steps
-cargo run --release --features "wgpu,cli,hub" --bin voxtral -- \
-  speak --text "Hello world" --gguf models/voxtral-tts-q4.gguf --euler-steps 3
-
-# List available voices
-cargo run --release --features "wgpu,cli,hub" --bin voxtral -- speak --list-voices
-```
-
-20 preset voices across 9 languages. The TTS pipeline runs backbone (Ministral 3B) autoregressive decoding, flow-matching acoustic prediction, and codec synthesis to produce 24 kHz audio.
-
-## Architecture
-
-```
-Audio (16kHz mono)
-  -> Mel spectrogram [B, 128, T]
-    -> Causal encoder (32 layers, 1280 dim, sliding window 750)
-      -> Conv 4x downsample -> Reshape [B, T/16, 5120]
-        -> Adapter [B, T/16, 3072]
-          -> Autoregressive decoder (26 layers, 3072 dim, GQA 32Q/8KV)
-            -> Token IDs -> Text
-```
-
-### Two Inference Paths
-
-| | BF16 (native) | Q4 GGUF (native + browser) |
-|---|---|---|
-| Weights | SafeTensors (~9 GB) | GGUF Q4_0 (~2.5 GB) |
-| Linear ops | Burn tensor matmul | Custom WGSL shader (fused dequant + matmul) |
-| Embeddings | f32 tensor (1.5 GiB) | Q4 on GPU (216 MB) + CPU bytes for lookups |
-| Browser | No | Yes (WASM + WebGPU) |
-
-### Q4 Padding Workaround
-
-The upstream mistral-common library left-pads audio with 32 silence tokens (at 12.5 Hz). After the mel/conv/reshape pipeline, this covers only 16 of the 38 decoder prefix positions with silence — the remaining 22 contain actual audio. The f32 model handles this fine, but Q4_0 quantization makes the decoder sensitive to speech content in the prefix: audio that starts immediately with speech (mic recordings, clips with no leading silence) produces all-pad tokens instead of text.
-
-The left padding is increased to 76 tokens, which maps to exactly 38 decoder tokens of silence and covers the full streaming prefix. See [`src/audio/pad.rs`](src/audio/pad.rs) for details.
-
-### WASM Constraints Solved
-
-Running a 4B model in a browser tab required solving five hard constraints:
-
-1. **2 GB allocation limit** — `ShardedCursor` reads across multiple `Vec<u8>` buffers
-2. **4 GB address space** — Two-phase loading: parse weights, drop reader, then finalize
-3. **1.5 GiB embedding table** — Q4 embeddings on GPU + CPU-side row lookups
-4. **No sync GPU readback** — All tensor reads use `into_data_async().await`
-5. **256 workgroup invocation limit** — Patched cubecl-wgpu to cap reduce kernel workgroups
+RTF < 1.0x = faster than real-time. At 3 Euler steps on capable hardware, audio plays in real-time with streaming.
 
 ## Building
 
 ```bash
-# Native (default features: wgpu + native-tokenizer)
+# Default: wgpu + native-tokenizer
 cargo build --release
 
-# With all features
-cargo build --release --features "wgpu,cli,hub"
-
-# WASM
-wasm-pack build --target web --no-default-features --features wasm
+# Run tests (GPU required for full suite)
+cargo test --release
 ```
 
-### Feature Flags
+## Model Files
 
-| Feature | Description |
-|---------|-------------|
-| `wgpu` (default) | GPU backend via Burn/CubeCL (WebGPU, Vulkan, Metal) |
-| `native-tokenizer` (default) | Tekken BPE encoding via tiktoken (WASM-compatible) |
-| `wasm` | Browser support: wasm-bindgen, WebGPU device init, JS bindings |
-| `cli` | CLI binary with clap + indicatif |
-| `hub` | HuggingFace Hub model downloads |
-
-## Testing
-
-```bash
-# Unit + integration tests (requires GPU for full suite)
-cargo test --features "wgpu,cli,hub"
-
-# Lint
-cargo clippy --features "wgpu,cli,hub" -- -D warnings
-cargo clippy --no-default-features --features wasm --target wasm32-unknown-unknown -- -D warnings
-
-# E2E browser test (requires Playwright + model shards)
-bunx playwright test tests/e2e_browser.spec.ts
-```
-
-GPU-dependent tests (model layer shapes, Q4 matmul, WGSL shader correctness) are skipped in CI since GitHub Actions runners lack a GPU adapter. These tests run locally on any machine with Vulkan, Metal, or WebGPU support.
-
-## Model Preparation
-
-### Q4 GGUF Sharding (for browser)
-
-GGUF files must be split into shards of 512 MB or less to stay under the browser's `ArrayBuffer` limit:
-
-```bash
-# ASR shards
-split -b 512m models/voxtral-q4.gguf models/voxtral-q4-shards/shard-
-
-# TTS shards (quantize first, then shard)
-uv run --with safetensors --with torch --with numpy --with packaging \
-  scripts/quantize_tts_gguf.py models/voxtral-tts/ -o models/voxtral-tts-q4.gguf
-split -b 512m models/voxtral-tts-q4.gguf models/voxtral-tts-q4-shards/shard-
-```
-
-The dev server discovers shards from `models/voxtral-q4-shards/` (ASR) and `models/voxtral-tts-q4-shards/` (TTS).
-
-## Project Structure
-
-```
-src/
-  audio/          # Mel spectrogram, chunking, resampling, padding
-  models/         # BF16 model: encoder, decoder, adapter, attention, RoPE, KV cache
-  gguf/           # Q4 GGUF: reader, loader, model, tensor, WGSL shader, tests
-  web/            # WASM bindings: VoxtralQ4, initWgpuDevice, async decode loop
-  tts/            # TTS pipeline: backbone, flow matching, codec, voice presets
-  tokenizer/      # Tekken tokenizer: decode (ASR) + encode (TTS via tiktoken)
-  bin/transcribe  # ASR CLI binary
-  bin/speak       # TTS CLI binary
-
-web/              # Browser demo: index.html, worker.js, voxtral-client.js
-tests/            # Integration tests + Playwright E2E spec
-scripts/          # Dev scripts: reference implementations, weight inspection, E2E helpers
-patches/          # cubecl-wgpu workgroup size fix for WebGPU
-```
+Download from [TrevorJS/voxtral-tts-q4-gguf](https://huggingface.co/TrevorJS/voxtral-tts-q4-gguf):
+- `voxtral-tts-q4.gguf` — Q4-quantized weights (2.67 GB)
+- `tekken.json` — Tekken BPE tokenizer
+- `voice_embedding/*.safetensors` — 20 voice presets across 9 languages
 
 ## License
 
-Apache-2.0
+Apache-2.0 (same as upstream)
