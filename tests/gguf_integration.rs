@@ -5,7 +5,7 @@
 
 use burn::backend::Wgpu;
 use burn::tensor::{Tensor, TensorData};
-use voxtral_mini_realtime::gguf::{q4_matmul, Q4Tensor};
+use voxtral_tts::gguf::{q4_matmul, Q4Tensor};
 
 type TestBackend = Wgpu;
 

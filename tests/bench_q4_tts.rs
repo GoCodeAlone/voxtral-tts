@@ -68,7 +68,7 @@ fn run_bench(text: &str, max_frames: usize, tag: &str, euler_steps_override: Opt
 
     // Load model
     let t0 = Instant::now();
-    let mut loader = voxtral_mini_realtime::gguf::Q4TtsModelLoader::from_file(Path::new(
+    let mut loader = voxtral_tts::gguf::Q4TtsModelLoader::from_file(Path::new(
         "models/voxtral-tts-q4.gguf",
     ))
     .unwrap();
@@ -84,17 +84,17 @@ fn run_bench(text: &str, max_frames: usize, tag: &str, euler_steps_override: Opt
     let voice_bytes =
         std::fs::read("models/voxtral-tts/voice_embedding/casual_female.safetensors").unwrap();
     let voice_embed: Tensor<Backend, 2> =
-        voxtral_mini_realtime::tts::voice::load_voice_from_bytes(&voice_bytes, 3072, &device)
+        voxtral_tts::tts::voice::load_voice_from_bytes(&voice_bytes, 3072, &device)
             .unwrap();
 
     // Tokenize
     let tokenizer_json = std::fs::read_to_string("models/voxtral-tts/tekken.json").unwrap();
     let tokenizer =
-        voxtral_mini_realtime::tokenizer::TekkenEncoder::from_json(&tokenizer_json).unwrap();
+        voxtral_tts::tokenizer::TekkenEncoder::from_json(&tokenizer_json).unwrap();
     let token_ids = tokenizer.encode(text);
 
     // Build input sequence
-    let special = voxtral_mini_realtime::tts::config::TtsSpecialTokens::default();
+    let special = voxtral_tts::tts::config::TtsSpecialTokens::default();
     let bos = backbone.embed_tokens_from_ids(&[special.bos_token_id as i32], 1, 1);
     let begin_audio = backbone.embed_tokens_from_ids(&[special.begin_audio_token_id as i32], 1, 1);
     let next_audio_text =
@@ -120,8 +120,8 @@ fn run_bench(text: &str, max_frames: usize, tag: &str, euler_steps_override: Opt
     let [_, seq_len, _] = input_sequence.dims();
 
     // Build codebook
-    let codebook_layout = voxtral_mini_realtime::tts::config::AudioCodebookLayout::default();
-    let codebook = voxtral_mini_realtime::tts::embeddings::AudioCodebookEmbeddings::new(
+    let codebook_layout = voxtral_tts::tts::config::AudioCodebookLayout::default();
+    let codebook = voxtral_tts::tts::embeddings::AudioCodebookEmbeddings::new(
         backbone.audio_codebook_embeddings().clone(),
         codebook_layout,
     );
@@ -165,7 +165,7 @@ fn run_bench(text: &str, max_frames: usize, tag: &str, euler_steps_override: Opt
             *s *= gain;
         }
     }
-    let audio_buf = voxtral_mini_realtime::audio::AudioBuffer::new(norm_samples, 24000);
+    let audio_buf = voxtral_tts::audio::AudioBuffer::new(norm_samples, 24000);
     let wav_path = format!("/tmp/bench_q4_{tag}.wav");
     audio_buf.save(Path::new(&wav_path)).unwrap();
 

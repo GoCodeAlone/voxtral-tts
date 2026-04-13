@@ -28,7 +28,7 @@ fn test_q4_tts_load_and_generate() {
     // Phase 1: Load Q4 GGUF
     println!("Loading Q4 TTS GGUF...");
     let start = std::time::Instant::now();
-    let mut loader = voxtral_mini_realtime::gguf::Q4TtsModelLoader::from_file(Path::new(
+    let mut loader = voxtral_tts::gguf::Q4TtsModelLoader::from_file(Path::new(
         "models/voxtral-tts-q4.gguf",
     ))
     .expect("Failed to open GGUF");
@@ -44,7 +44,7 @@ fn test_q4_tts_load_and_generate() {
     let voice_bytes =
         std::fs::read("models/voxtral-tts/voice_embedding/casual_female.safetensors").unwrap();
     let voice_embed: Tensor<Backend, 2> =
-        voxtral_mini_realtime::tts::voice::load_voice_from_bytes(&voice_bytes, 3072, &device)
+        voxtral_tts::tts::voice::load_voice_from_bytes(&voice_bytes, 3072, &device)
             .expect("Failed to load voice");
 
     let [voice_frames, dim] = voice_embed.dims();
@@ -54,7 +54,7 @@ fn test_q4_tts_load_and_generate() {
 
     // Phase 3: Tokenize text
     let tokenizer_json = std::fs::read_to_string("models/voxtral-tts/tekken.json").unwrap();
-    let tokenizer = voxtral_mini_realtime::tokenizer::TekkenEncoder::from_json(&tokenizer_json)
+    let tokenizer = voxtral_tts::tokenizer::TekkenEncoder::from_json(&tokenizer_json)
         .expect("Failed to load tokenizer");
 
     let text = "Mary had a little lamb";
@@ -63,7 +63,7 @@ fn test_q4_tts_load_and_generate() {
     assert!(!token_ids.is_empty());
 
     // Phase 4: Build input sequence using Q4 backbone's embed_tokens_from_ids
-    let special = voxtral_mini_realtime::tts::config::TtsSpecialTokens::default();
+    let special = voxtral_tts::tts::config::TtsSpecialTokens::default();
     let bos = backbone.embed_tokens_from_ids(&[special.bos_token_id as i32], 1, 1);
     let begin_audio = backbone.embed_tokens_from_ids(&[special.begin_audio_token_id as i32], 1, 1);
     let next_audio_text =
@@ -91,8 +91,8 @@ fn test_q4_tts_load_and_generate() {
     println!("Input sequence: {seq_len} tokens");
 
     // Phase 5: Run async generate (short: 50 frames max for test speed)
-    let codebook_layout = voxtral_mini_realtime::tts::config::AudioCodebookLayout::default();
-    let codebook = voxtral_mini_realtime::tts::embeddings::AudioCodebookEmbeddings::new(
+    let codebook_layout = voxtral_tts::tts::config::AudioCodebookLayout::default();
+    let codebook = voxtral_tts::tts::embeddings::AudioCodebookEmbeddings::new(
         backbone.audio_codebook_embeddings().clone(),
         codebook_layout,
     );
@@ -172,7 +172,7 @@ fn test_q4_tts_load_and_generate() {
             *s *= gain;
         }
     }
-    let audio_buf = voxtral_mini_realtime::audio::AudioBuffer::new(norm_samples, 24000);
+    let audio_buf = voxtral_tts::audio::AudioBuffer::new(norm_samples, 24000);
     audio_buf
         .save(std::path::Path::new("/tmp/q4_tts_mary.wav"))
         .expect("Failed to save WAV");
