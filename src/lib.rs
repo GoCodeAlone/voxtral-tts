@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod audio_output;
+pub mod backend;
 pub mod engine;
 pub mod ring_buffer;
 #[cfg(feature = "wgpu")]
