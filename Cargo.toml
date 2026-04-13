@@ -1,47 +1,33 @@
 [package]
-name = "voxtral-mini-realtime"
-version = "0.2.5"
+name = "voxtral-tts"
+version = "0.3.0"
 edition = "2021"
-description = "Voxtral Mini 4B Realtime - Streaming ASR in Rust with Burn"
+description = "Voxtral TTS — streaming audio lib crate for Core Dump sidecar"
 license = "Apache-2.0"
-repository = "https://github.com/TrevorS/voxtral-mini-realtime-rs"
-authors = ["Trevor Strieber"]
+repository = "https://github.com/GoCodeAlone/voxtral-tts"
+authors = ["Jon Langevin"]
 
 [features]
 default = ["wgpu", "native-tokenizer"]
 wgpu = ["burn/wgpu"]
-cli = ["clap", "indicatif"]
-hub = ["hf-hub"]
-# Tekken BPE encoding via tiktoken (WASM-compatible, no C deps)
+# Tekken BPE encoding via tiktoken
 native-tokenizer = ["tiktoken-rs"]
-# WASM/browser support - uses wgpu (WebGPU) backend for GPU inference
-wasm = [
-    "wgpu",
-    "dep:wgpu",
-    "native-tokenizer",
-    "wasm-bindgen",
-    "wasm-bindgen-futures",
-    "js-sys",
-    "web-sys",
-    "console_error_panic_hook",
-    "getrandom/wasm_js",
-]
 profiling = ["tracing-chrome"]
 
 [dependencies]
-# Burn ML framework - latest version with backend selection via features
+# Burn ML framework
 burn = { version = "0.20", default-features = false, features = ["std", "autodiff", "template", "autotune"] }
 cubecl = { version = "0.9", default-features = false, features = ["wgpu"] }
 
-# Tekken BPE encoding (tiktoken core, WASM-compatible)
+# Tekken BPE encoding
 tiktoken-rs = { version = "0.9", optional = true }
 base64 = "0.22"
 
 # Audio processing
-hound = "3.5"              # WAV I/O
-rubato = "1.0"             # High-quality resampling
-rustfft = "6.4"            # FFT for spectrograms
-audioadapter-buffers = "2.0" # Buffer adapters for rubato
+hound = "3.5"
+rubato = "1.0"
+rustfft = "6.4"
+audioadapter-buffers = "2.0"
 
 # Serialization & model loading
 safetensors = "0.7"
@@ -59,46 +45,19 @@ num-traits = "0.2"
 num-complex = "0.4"
 byteorder = "1.5"
 flate2 = "1.1"
-
-# CLI (optional)
-clap = { version = "4.5", features = ["derive"], optional = true }
-indicatif = { version = "0.18", optional = true }
-
-# HuggingFace Hub (optional)
-hf-hub = { version = "0.4", default-features = false, features = ["ureq"], optional = true }
 half = "2.7"
 memmap2 = "0.9"
+rustc-hash = "1.1"
 
-# NDArray for test data loading (used by test binary too)
+# NDArray for test data loading
 ndarray = "0.16"
 ndarray-npy = "0.9"
-
-# WASM support (optional)
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-js-sys = { version = "0.3", optional = true }
-web-sys = { version = "0.3", features = ["console"], optional = true }
-console_error_panic_hook = { version = "0.1", optional = true }
-getrandom = { version = "0.3", default-features = false, optional = true }
-# Direct wgpu dep for custom device init (must match cubecl-wgpu's version)
-wgpu = { version = "26", features = ["fragile-send-sync-non-atomic-wasm"], optional = true }
-rustc-hash = "1.1"
 
 [dev-dependencies]
 criterion = "0.8"
 approx = "0.5"
 tempfile = "3.24"
 pollster = "0.4.0"
-
-[[bin]]
-name = "voxtral"
-path = "src/bin/voxtral/main.rs"
-required-features = ["cli", "native-tokenizer"]
-
-[[bin]]
-name = "e2e-bench"
-path = "src/bin/e2e_bench.rs"
-required-features = ["wgpu", "cli"]
 
 [[bench]]
 name = "audio"
@@ -114,36 +73,21 @@ name = "q4_pipeline"
 harness = false
 required-features = ["wgpu"]
 
-# WASM library target
 [lib]
-crate-type = ["cdylib", "rlib"]
-
-# cargo-dist configuration
-[package.metadata.dist]
-features = ["wgpu", "cli", "hub"]
-dist = true
+crate-type = ["rlib"]
 
 [profile.release]
 lto = true
 codegen-units = 1
 opt-level = 3
 
-[profile.release-wasm]
-inherits = "release"
-# Optimize for size in WASM
-opt-level = "s"
-
 [profile.profiling]
 inherits = "release"
 debug = 1
 
-# The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
 lto = "thin"
 
-# Patch cubecl-wgpu to cap subgroup size workaround against WebGPU's
-# max_compute_invocations_per_workgroup (256). Without this, cubek-reduce
-# creates workgroups of 128*8=1024 which exceeds the WebGPU limit.
 [patch.crates-io]
 cubecl-wgpu = { path = "patches/cubecl-wgpu-0.9.0" }
