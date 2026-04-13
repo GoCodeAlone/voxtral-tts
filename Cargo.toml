@@ -10,6 +10,9 @@ authors = ["Jon Langevin"]
 [features]
 default = ["wgpu", "native-tokenizer"]
 wgpu = ["burn/wgpu"]
+cuda = ["burn/cuda", "cubecl-cuda"]
+metal = ["burn/metal"]
+rocm = ["burn/rocm"]
 # Tekken BPE encoding via tiktoken
 native-tokenizer = ["tiktoken-rs"]
 profiling = ["tracing-chrome"]
@@ -18,6 +21,7 @@ profiling = ["tracing-chrome"]
 # Burn ML framework
 burn = { version = "0.20", default-features = false, features = ["std", "autodiff", "template", "autotune"] }
 cubecl = { version = "0.9", default-features = false, features = ["wgpu"] }
+cubecl-cuda = { version = "0.9", optional = true }
 
 # Tekken BPE encoding
 tiktoken-rs = { version = "0.9", optional = true }
