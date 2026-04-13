@@ -192,7 +192,11 @@ impl<B: Backend> TtsPipeline<B> {
 
         // Extract samples to CPU
         let data = waveform.to_data();
-        let mut samples: Vec<f32> = data.as_slice::<f32>().unwrap()[..total_samples].to_vec();
+        let mut samples: Vec<f32> = data
+            .as_slice::<f32>()
+            .map_err(|e| anyhow::anyhow!("failed to extract audio samples: {e}"))?
+            [..total_samples]
+            .to_vec();
 
         // Peak normalize to 0.95 to prevent clipping
         let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);

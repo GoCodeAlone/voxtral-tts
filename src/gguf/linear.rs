@@ -36,12 +36,12 @@ impl Q4Linear {
     ///
     /// `x` shape: `[B, M, K]` where `K = in_features`.
     /// Returns shape: `[B, M, N]` where `N = out_features`.
-    pub fn forward(&self, x: Tensor<Wgpu, 3>) -> Tensor<Wgpu, 3> {
-        let out = q4_matmul(x, &self.weights);
-        match &self.bias {
+    pub fn forward(&self, x: Tensor<Wgpu, 3>) -> Result<Tensor<Wgpu, 3>, String> {
+        let out = q4_matmul(x, &self.weights)?;
+        Ok(match &self.bias {
             Some(bias) => out + bias.clone().unsqueeze::<3>(),
             None => out,
-        }
+        })
     }
 }
 
@@ -77,13 +77,13 @@ impl Q4FusedGateUp {
     }
 
     /// Forward: single Q4 matmul → split into (gate, up).
-    pub fn forward(&self, x: Tensor<Wgpu, 3>) -> (Tensor<Wgpu, 3>, Tensor<Wgpu, 3>) {
-        let fused = q4_matmul(x, &self.weights);
+    pub fn forward(&self, x: Tensor<Wgpu, 3>) -> Result<(Tensor<Wgpu, 3>, Tensor<Wgpu, 3>), String> {
+        let fused = q4_matmul(x, &self.weights)?;
 
         let gate = fused.clone().narrow(2, 0, self.gate_out);
         let up = fused.narrow(2, self.gate_out, self.up_out);
 
-        (gate, up)
+        Ok((gate, up))
     }
 }
 
@@ -105,13 +105,13 @@ impl Q4FusedQKV {
     pub fn forward(
         &self,
         x: Tensor<Wgpu, 3>,
-    ) -> (Tensor<Wgpu, 3>, Tensor<Wgpu, 3>, Tensor<Wgpu, 3>) {
-        let fused = q4_matmul(x, &self.weights);
+    ) -> Result<(Tensor<Wgpu, 3>, Tensor<Wgpu, 3>, Tensor<Wgpu, 3>), String> {
+        let fused = q4_matmul(x, &self.weights)?;
 
         let q = fused.clone().narrow(2, 0, self.q_out);
         let k = fused.clone().narrow(2, self.q_out, self.k_out);
         let v = fused.narrow(2, self.q_out + self.k_out, self.v_out);
 
-        (q, k, v)
+        Ok((q, k, v))
     }
 }

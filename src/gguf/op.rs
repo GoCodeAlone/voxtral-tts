@@ -83,7 +83,7 @@ impl KernelSource for Q4MatmulNaiveKernel {
 /// (out_features, in_features), matching PyTorch/GGUF convention.
 /// Dequantization happens inside the compute shader — no intermediate
 /// full-precision weight buffer is created.
-pub fn q4_matmul(input: Tensor<Wgpu, 3>, weights: &Q4Tensor) -> Tensor<Wgpu, 3> {
+pub fn q4_matmul(input: Tensor<Wgpu, 3>, weights: &Q4Tensor) -> Result<Tensor<Wgpu, 3>, String> {
     // Convert Tensor → CubeTensor and ensure contiguous layout
     let cube_input: CubeTensor<WgpuRuntime> = input.into_primitive().tensor();
     let cube_input = into_contiguous(cube_input);
@@ -123,7 +123,7 @@ pub fn q4_matmul(input: Tensor<Wgpu, 3>, weights: &Q4Tensor) -> Tensor<Wgpu, 3> 
         .with_buffer(output_handle.clone().binding())
         .with_buffer(info_handle.binding());
 
-    dispatch(&client, b, m, n, bindings);
+    dispatch(&client, b, m, n, bindings)?;
 
     // Wrap output handle in a CubeTensor → Tensor
     let output_tensor = CubeTensor::new_contiguous(
@@ -133,7 +133,7 @@ pub fn q4_matmul(input: Tensor<Wgpu, 3>, weights: &Q4Tensor) -> Tensor<Wgpu, 3> 
         output_handle,
         DType::F32,
     );
-    Tensor::from_primitive(TensorPrimitive::Float(output_tensor))
+    Ok(Tensor::from_primitive(TensorPrimitive::Float(output_tensor)))
 }
 
 /// Dispatch the appropriate kernel variant.
@@ -147,7 +147,7 @@ fn dispatch(
     m: usize,
     n: usize,
     bindings: Bindings,
-) {
+) -> Result<(), String> {
     if m <= TILED_M_THRESHOLD {
         let kernel = SourceKernel::new(
             Q4MatmulTiledKernel {
@@ -163,9 +163,9 @@ fn dispatch(
                 CubeCount::new_2d(wg_x, wg_y),
                 bindings,
             )
-            .expect("Q4 tiled matmul kernel launch failed");
+            .map_err(|e| format!("Q4 tiled matmul kernel launch failed: {e}"))
     } else {
-        dispatch_naive(client, b, m, n, bindings);
+        dispatch_naive(client, b, m, n, bindings)
     }
 }
 
@@ -176,8 +176,8 @@ fn dispatch(
     m: usize,
     n: usize,
     bindings: Bindings,
-) {
-    dispatch_naive(client, b, m, n, bindings);
+) -> Result<(), String> {
+    dispatch_naive(client, b, m, n, bindings)
 }
 
 fn dispatch_naive(
@@ -186,7 +186,7 @@ fn dispatch_naive(
     m: usize,
     n: usize,
     bindings: Bindings,
-) {
+) -> Result<(), String> {
     let kernel = SourceKernel::new(
         Q4MatmulNaiveKernel {
             workgroup_size_x: NAIVE_WG_X,
@@ -202,5 +202,5 @@ fn dispatch_naive(
             CubeCount::new_2d(wg_x, wg_y),
             bindings,
         )
-        .expect("Q4 naive matmul kernel launch failed");
+        .map_err(|e| format!("Q4 naive matmul kernel launch failed: {e}"))
 }

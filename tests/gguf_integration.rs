@@ -100,7 +100,7 @@ fn test_q4_roundtrip_small() {
     let q4_bytes = quantize_f32_to_q4_0(&weights_f32);
     let q4_tensor =
         Q4Tensor::from_q4_bytes(&q4_bytes, [n, k], &device).expect("Failed to create Q4Tensor");
-    let output_q4 = q4_matmul(act_tensor, &q4_tensor);
+    let output_q4 = q4_matmul(act_tensor, &q4_tensor).unwrap();
 
     // Compare (includes full quantization noise)
     let out_data = output_q4.to_data();
@@ -160,7 +160,7 @@ fn test_q4_roundtrip_model_shapes() {
             Tensor::<TestBackend, 3>::from_data(TensorData::new(acts, [1, seq, k]), &device);
         let q4_tensor =
             Q4Tensor::from_q4_bytes(&q4_bytes, [n, k], &device).expect("Failed to create Q4Tensor");
-        let output = q4_matmul(act_tensor, &q4_tensor);
+        let output = q4_matmul(act_tensor, &q4_tensor).unwrap();
 
         assert_eq!(output.dims(), [1, seq, n], "{} shape mismatch", name);
         println!("  {}: output shape {:?} -- OK", name, output.dims());
@@ -200,7 +200,7 @@ fn test_q4_roundtrip_vs_dequantized() {
     // Path B: Q4 GPU matmul
     let q4_tensor =
         Q4Tensor::from_q4_bytes(&q4_bytes, [n, k], &device).expect("Failed to create Q4Tensor");
-    let output = q4_matmul(act_tensor, &q4_tensor);
+    let output = q4_matmul(act_tensor, &q4_tensor).unwrap();
 
     let out_data = output.to_data();
     let exp_data = expected.to_data();

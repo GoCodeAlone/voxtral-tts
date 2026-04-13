@@ -619,7 +619,7 @@ mod tests {
         let mel = Tensor::<Wgpu, 3>::zeros([1, 128, 320], &device);
         let t_embed = Tensor::<Wgpu, 3>::zeros([1, 1, 3072], &device);
 
-        let logits = model.forward(mel, t_embed);
+        let logits = model.forward(mel, t_embed).unwrap();
 
         // 320 mel frames → 80 after conv → 20 after reshape(4)
         assert_eq!(logits.dims()[0], 1);

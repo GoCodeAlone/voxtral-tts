@@ -391,7 +391,7 @@ mod tests {
             Tensor::<TestBackend, 3>::from_data(TensorData::new(act_data, [1, 1, k]), &device);
         let q4_tensor =
             Q4Tensor::from_q4_bytes(&q4_bytes, [n, k], &device).expect("Failed to create Q4Tensor");
-        let output = q4_matmul(activations, &q4_tensor);
+        let output = q4_matmul(activations, &q4_tensor).unwrap();
 
         assert_eq!(output.dims(), [1, 1, n]);
 
@@ -453,7 +453,7 @@ mod tests {
             // Q4 GPU path
             let q4_tensor = Q4Tensor::from_q4_bytes(&q4_bytes, [n, k], &device)
                 .expect("Failed to create Q4Tensor");
-            let output = q4_matmul(act_tensor, &q4_tensor);
+            let output = q4_matmul(act_tensor, &q4_tensor).unwrap();
 
             assert_eq!(output.dims(), [batch, seq, n]);
 
@@ -498,7 +498,7 @@ mod tests {
         let linear = Q4Linear::new(q4_tensor, None);
 
         let input = Tensor::<TestBackend, 3>::zeros([2, 5, in_features], &device);
-        let output = linear.forward(input);
+        let output = linear.forward(input).unwrap();
 
         assert_eq!(output.dims(), [2, 5, out_features]);
     }
@@ -533,7 +533,7 @@ mod tests {
             TensorData::new(act_data.clone(), [1, 1, in_features]),
             &device,
         );
-        let output = linear.forward(input);
+        let output = linear.forward(input).unwrap();
 
         assert_eq!(output.dims(), [1, 1, out_features]);
 
@@ -590,7 +590,7 @@ mod tests {
         let ffn = Q4FeedForward::new(w1, w2, w3);
 
         let input = Tensor::<TestBackend, 3>::zeros([1, 4, d_model], &device);
-        let output = ffn.forward(input);
+        let output = ffn.forward(input).unwrap();
 
         assert_eq!(output.dims(), [1, 4, d_model]);
     }
@@ -627,7 +627,7 @@ mod tests {
         let adapter = Q4Adapter::new(linear1, linear2);
 
         let input = Tensor::<TestBackend, 3>::zeros([1, 4, test_in], &device);
-        let output = adapter.forward(input);
+        let output = adapter.forward(input).unwrap();
 
         assert_eq!(output.dims(), [1, 4, test_out]);
 
@@ -672,7 +672,7 @@ mod tests {
 
         let q4_tensor =
             Q4Tensor::from_q4_bytes(&q4_bytes, [n, k], &device).expect("Failed to create Q4Tensor");
-        let output = q4_matmul(act_tensor, &q4_tensor);
+        let output = q4_matmul(act_tensor, &q4_tensor).unwrap();
 
         assert_eq!(output.dims(), [batch, seq, n]);
 

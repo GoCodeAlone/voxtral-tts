@@ -97,7 +97,11 @@ pub fn load_tensor_raw<B: Backend, const D: usize>(
         bail!("Safetensors data too short for header length");
     }
 
-    let header_size = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
+    let header_size = u64::from_le_bytes(
+        bytes[0..8]
+            .try_into()
+            .context("Failed to read safetensors header length bytes")?,
+    ) as usize;
     if 8 + header_size > bytes.len() {
         bail!(
             "Safetensors header size {} exceeds file length {}",
@@ -120,8 +124,13 @@ pub fn load_tensor_raw<B: Backend, const D: usize>(
         .as_array()
         .context("Missing shape in tensor info")?
         .iter()
-        .map(|v| v.as_u64().unwrap() as usize)
-        .collect();
+        .enumerate()
+        .map(|(i, v)| {
+            v.as_u64()
+                .map(|n| n as usize)
+                .with_context(|| format!("Shape dim {i} is not a u64 in tensor '{name}'"))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let start = info["data_offsets"][0]
         .as_u64()
         .context("Missing data_offsets[0]")? as usize;
