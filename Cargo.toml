@@ -102,3 +102,4 @@ codegen-units = 4
 
 [patch.crates-io]
 cubecl-wgpu = { path = "patches/cubecl-wgpu-0.9.0" }
+cubecl-std = { path = "patches/cubecl-std-0.9.0" }

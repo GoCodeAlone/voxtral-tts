@@ -190,6 +190,12 @@ impl<B: Backend> CodecDecoder<B> {
     ) -> Tensor<B, 2> {
         let n_frames = semantic_indices.len();
 
+        // Early exit for empty generation (e.g. Metal generating 0 frames).
+        if n_frames == 0 {
+            let device = acoustic_indices.device();
+            return Tensor::zeros([1, 0], &device);
+        }
+
         // Step 1: Dequantize tokens to continuous features
         // Semantic: VQ codebook lookup → [N, 256]
         let semantic_embeds = self.vq_codebook.dequantize(semantic_indices);
@@ -199,7 +205,7 @@ impl<B: Backend> CodecDecoder<B> {
 
         // Step 2: Concatenate semantic + acoustic → [N, input_channels]
         let features = Tensor::cat(vec![semantic_embeds, acoustic_values], 1);
-        let input_channels = features.dims()[1];
+        let [_feat_rows, input_channels] = features.dims();
 
         // Step 3: Reshape to conv format [1, input_channels, N] (batch, channels, time)
         let x = features
