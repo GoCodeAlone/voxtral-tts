@@ -6,29 +6,27 @@
   "phrases": 10,
   "wgpu": { "rtf_min": 5.409, "rtf_avg": 6.630, "rtf_max": 9.715, "rtf_p99": 9.715 },
   "metal": {
-    "status": "compilation_failed",
+    "status": "runtime_failed",
     "rtf_min": null,
     "rtf_avg": null,
     "rtf_max": null,
     "rtf_p99": null,
-    "error_count": 73,
-    "root_cause": "Model structs are hardcoded to Wgpu backend (e.g. `rope: RoPE<Wgpu>`, `norm: RmsNorm<Wgpu>`, `tok_embeddings: Tensor<Wgpu, 2>`). Metal's CubeBackend uses u32 for its integer element type parameter; wgpu uses u8. The mismatch propagates to every struct field and method signature that references these types. Fix requires making all model structs generic over B: Backend and replacing Wgpu type annotations with the generic B.",
-    "error_breakdown": {
-      "E0308_mismatched_types": 46,
-      "E0599_no_method_weights_on_Q4Linear": 10,
-      "E0061_wrong_arg_count": 12,
-      "E0277_trait_bound_ElementConversion": 4,
-      "E0308_match_arms_incompatible": 1
-    },
-    "fix_estimate": "Refactor all model structs in src/gguf/ to be generic over B: Backend. Medium effort — mechanical change but large surface area."
+    "compilation_status": "clean",
+    "compilation_fix_commit": "a926941",
+    "runtime_error": "thread panicked at cubecl-std-0.9.0/src/fast_math.rs:100:22: attempt to divide by zero",
+    "runtime_error_location": "cubecl_std::fast_math::launch::FastDivmodArgs::register → burn_cubecl::kernel::index::slice_assign::slice_assign_kernel::launch_unchecked → burn_backend::tensor::ops::float::cat",
+    "root_cause": "cubecl-std 0.9.0 slice_assign_kernel receives a zero tensor dimension in its FastDivmod slice_shape argument during Tensor::cat on the Metal backend. FastDivmod::find_params_u32(0) panics at integer division. The compilation fix (commit a926941) is complete — model structs are now generic over ActiveBackend. The runtime failure is in cubecl-std 0.9.0's slice_assign kernel which computes magic-number divisors for indexing and panics when any slice dimension is zero. Exact zero-dimension source not yet identified; candidates are (1) a tensor produced by an intermediate Metal kernel operation with an unexpected stride, (2) a degenerate batch dimension from argmax/cat interaction on Metal, or (3) a cubecl 0.9.0 Metal-specific bug in the LinearView computation for slice_assign.",
+    "model_load_ms": 21197,
+    "failure_after_ms": 89450,
+    "fix_estimate": "Patch cubecl-std 0.9.0 to trace which tensor dimension is zero, or upgrade to a cubecl release that fixes Metal slice_assign."
   },
   "metal_f16": {
-    "status": "blocked_by_metal_compilation_failure",
+    "status": "blocked_by_metal_runtime_failure",
     "rtf_min": null,
     "rtf_avg": null,
     "rtf_max": null,
     "rtf_p99": null
   },
-  "note": "wgpu measured 2026-04-13 on Apple M-series, --profile bench (no LTO), euler_steps=4, 10 phrases. Metal backend blocked by non-generic model structs — see metal.root_cause.",
-  "conclusion": "Metal benchmark cannot run until model structs are made generic over B: Backend. The wgpu WGSL shader path (RTF avg 6.63x) is currently the only working GPU path on macOS. Auto-disable threshold (5.0x) is NOT met — TTS remains disabled on this hardware until Metal is fixed or wgpu RTF improves."
+  "note": "wgpu measured 2026-04-13 on Apple M-series, --profile bench (no LTO), euler_steps=4, 10 phrases. Metal compilation fixed 2026-04-13 (commit a926941 — all Wgpu type refs replaced with ActiveBackend). Metal runtime failure discovered same day: cubecl-std 0.9.0 panics in slice_assign FastDivmod with divisor=0 during Tensor::cat.",
+  "conclusion": "Metal compiles clean as of commit a926941 but fails at runtime due to a cubecl-std 0.9.0 bug in the Metal slice_assign kernel. The wgpu WGSL shader path (RTF avg 6.63x) remains the only working GPU path on macOS. Auto-disable threshold (5.0x) is NOT met — TTS remains disabled on this hardware until the Metal runtime bug is resolved."
 }
