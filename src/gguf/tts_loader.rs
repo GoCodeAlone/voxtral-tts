@@ -24,6 +24,8 @@ use crate::tts::codec::quantizer::VqCodebook;
 use crate::tts::codec::CodecDecoder;
 use crate::tts::config::{CodecDecoderConfig, FmTransformerConfig, TtsBackboneConfig};
 
+#[cfg(not(feature = "wgpu"))]
+use super::op::DequantPrecision;
 use super::loader::{
     dequantize_q4_0_cpu, gguf_load_f32_tensor, gguf_load_q4_linear, gguf_load_rms_norm,
     reverse_gguf_dims,
@@ -58,11 +60,20 @@ impl Q4TtsModelParts {
     pub fn finalize(self) -> Result<(Q4TtsBackbone, Q4FmTransformer, CodecDecoder<ActiveBackend>)> {
         let [vocab, d_model] = self.tok_embed_shape;
 
+        #[cfg(feature = "wgpu")]
         let tok_embed_q4 =
             Q4Tensor::from_q4_bytes(&self.tok_embed_q4_bytes, [vocab, d_model], &self.device)?;
+        #[cfg(not(feature = "wgpu"))]
+        let tok_embed_q4 =
+            Q4Tensor::from_q4_bytes(&self.tok_embed_q4_bytes, [vocab, d_model])?;
+
+        #[cfg(feature = "wgpu")]
+        let lm_head = super::linear::Q4Linear::new(tok_embed_q4, None);
+        #[cfg(not(feature = "wgpu"))]
+        let lm_head = super::linear::Q4Linear::new(tok_embed_q4, None, &self.device, DequantPrecision::F16);
 
         let tok_embeddings = TokEmbedStore::Q4 {
-            lm_head: super::linear::Q4Linear::new(tok_embed_q4, None),
+            lm_head,
             cpu_bytes: self.tok_embed_q4_bytes,
         };
 

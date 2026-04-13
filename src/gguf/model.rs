@@ -5,12 +5,11 @@
 //! ops (RMSNorm, RoPE, softmax, GELU, convolution, attention masking)
 //! stay as regular Burn f32 tensors/ops.
 
-use burn::backend::wgpu::WgpuDevice;
-use burn::backend::Wgpu;
 use burn::prelude::ElementConversion;
 use burn::tensor::activation::{gelu, silu, softmax};
 use burn::tensor::{Int, Tensor, TensorData};
 
+use crate::backend::{ActiveBackend, ActiveDevice};
 use crate::models::adapter::reshape_encoder_output;
 use crate::models::layers::masking::{
     apply_causal_mask, apply_causal_mask_with_offset, apply_sliding_window_mask,
@@ -18,6 +17,8 @@ use crate::models::layers::masking::{
 };
 use crate::models::layers::{ConvDownsampler, KVCache, LayerCaches, RmsNorm, RoPE};
 
+#[cfg(not(feature = "wgpu"))]
+use super::op::DequantPrecision;
 use super::linear::Q4Linear;
 
 // ---------------------------------------------------------------------------
@@ -36,9 +37,9 @@ pub struct Q4Attention {
     wo: Q4Linear,
     /// Fused QKV projection (single matmul instead of 3). Created lazily.
     fused_qkv: Option<super::linear::Q4FusedQKV>,
-    n_heads: usize,
-    n_kv_heads: usize,
-    head_dim: usize,
+    pub(crate) n_heads: usize,
+    pub(crate) n_kv_heads: usize,
+    pub(crate) head_dim: usize,
     scale: f32,
     sliding_window: Option<usize>,
 }
@@ -79,11 +80,11 @@ impl Q4Attention {
     /// * `causal` - Whether to apply causal masking
     pub fn forward(
         &self,
-        x: Tensor<Wgpu, 3>,
-        rope: &RoPE<Wgpu>,
+        x: Tensor<ActiveBackend, 3>,
+        rope: &RoPE<ActiveBackend>,
         offset: usize,
         causal: bool,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let [batch, seq_len, _] = x.dims();
 
         // QKV projection — fused (1 kernel) or separate (3 kernels)
@@ -133,11 +134,11 @@ impl Q4Attention {
     /// Forward pass with KV cache.
     pub fn forward_with_cache(
         &self,
-        x: Tensor<Wgpu, 3>,
-        rope: &RoPE<Wgpu>,
-        cache: &mut KVCache<Wgpu>,
+        x: Tensor<ActiveBackend, 3>,
+        rope: &RoPE<ActiveBackend>,
+        cache: &mut KVCache<ActiveBackend>,
         causal: bool,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let [batch, seq_len, _] = x.dims();
         let offset = cache.seq_len();
 
@@ -193,7 +194,11 @@ impl Q4Attention {
     /// After calling this, `forward` and `forward_with_cache` use a single
     /// Q4 matmul for the QKV projection instead of 3 separate launches.
     /// Call once after loading weights (one-time GPU read + upload cost).
-    pub fn fuse_qkv(&mut self, device: &burn::backend::wgpu::WgpuDevice) {
+    ///
+    /// Only available on wgpu — non-wgpu backends pre-dequantize weights at
+    /// load time and fusion is handled differently.
+    #[cfg(feature = "wgpu")]
+    pub fn fuse_qkv(&mut self, device: &ActiveDevice) {
         if self.fused_qkv.is_some() {
             return; // Already fused
         }
@@ -231,9 +236,9 @@ impl Q4Attention {
     /// matmul handles the broadcast natively.
     fn expand_kv(
         &self,
-        k: Tensor<Wgpu, 4>,
-        v: Tensor<Wgpu, 4>,
-    ) -> (Tensor<Wgpu, 4>, Tensor<Wgpu, 4>) {
+        k: Tensor<ActiveBackend, 4>,
+        v: Tensor<ActiveBackend, 4>,
+    ) -> (Tensor<ActiveBackend, 4>, Tensor<ActiveBackend, 4>) {
         if self.n_heads == self.n_kv_heads {
             return (k, v);
         }
@@ -265,9 +270,9 @@ impl Q4Attention {
 /// Computes `w2(silu(w1(x)) * w3(x))`.
 /// Optionally fuses w1+w3 into a single Q4 matmul (gate+up projection).
 pub struct Q4FeedForward {
-    w1: Q4Linear,
-    w2: Q4Linear,
-    w3: Q4Linear,
+    pub(crate) w1: Q4Linear,
+    pub(crate) w2: Q4Linear,
+    pub(crate) w3: Q4Linear,
     /// Fused gate+up projection (w1||w3). Single matmul instead of 2.
     fused_gate_up: Option<super::linear::Q4FusedGateUp>,
 }
@@ -284,7 +289,7 @@ impl Q4FeedForward {
     }
 
     /// Forward pass.
-    pub fn forward(&self, x: Tensor<Wgpu, 3>) -> Result<Tensor<Wgpu, 3>, String> {
+    pub fn forward(&self, x: Tensor<ActiveBackend, 3>) -> Result<Tensor<ActiveBackend, 3>, String> {
         if let Some(fused) = &self.fused_gate_up {
             let (gate, up) = fused.forward(x)?;
             self.w2.forward(silu(gate) * up)
@@ -296,7 +301,10 @@ impl Q4FeedForward {
     }
 
     /// Fuse w1+w3 into single Q4 matmul for the gate+up projection.
-    pub fn fuse_gate_up(&mut self, device: &burn::backend::wgpu::WgpuDevice) {
+    ///
+    /// Only available on wgpu — non-wgpu backends pre-dequantize at load time.
+    #[cfg(feature = "wgpu")]
+    pub fn fuse_gate_up(&mut self, device: &ActiveDevice) {
         if self.fused_gate_up.is_some() {
             return;
         }
@@ -341,7 +349,7 @@ impl Q4AdaRmsNorm {
     /// # Arguments
     /// * `x` - Input tensor `[batch, seq, d_model]`
     /// * `t_embed` - Temporal embedding `[batch, 1, d_model]`
-    pub fn forward(&self, x: Tensor<Wgpu, 3>, t_embed: Tensor<Wgpu, 3>) -> Result<Tensor<Wgpu, 3>, String> {
+    pub fn forward(&self, x: Tensor<ActiveBackend, 3>, t_embed: Tensor<ActiveBackend, 3>) -> Result<Tensor<ActiveBackend, 3>, String> {
         let scale = self.w0.forward(t_embed)?;
         let scale = gelu(scale);
         let scale = self.w2.forward(scale)?;
@@ -355,18 +363,18 @@ impl Q4AdaRmsNorm {
 
 /// Audio encoder transformer layer with Q4-quantized weights.
 pub struct Q4EncoderLayer {
-    attention_norm: RmsNorm<Wgpu>,
+    attention_norm: RmsNorm<ActiveBackend>,
     attention: Q4Attention,
-    ffn_norm: RmsNorm<Wgpu>,
+    ffn_norm: RmsNorm<ActiveBackend>,
     ffn: Q4FeedForward,
 }
 
 impl Q4EncoderLayer {
     /// Create a new Q4 encoder layer.
     pub fn new(
-        attention_norm: RmsNorm<Wgpu>,
+        attention_norm: RmsNorm<ActiveBackend>,
         attention: Q4Attention,
-        ffn_norm: RmsNorm<Wgpu>,
+        ffn_norm: RmsNorm<ActiveBackend>,
         ffn: Q4FeedForward,
     ) -> Self {
         Self {
@@ -378,7 +386,7 @@ impl Q4EncoderLayer {
     }
 
     /// Forward pass.
-    pub fn forward(&self, x: Tensor<Wgpu, 3>, rope: &RoPE<Wgpu>, offset: usize) -> Result<Tensor<Wgpu, 3>, String> {
+    pub fn forward(&self, x: Tensor<ActiveBackend, 3>, rope: &RoPE<ActiveBackend>, offset: usize) -> Result<Tensor<ActiveBackend, 3>, String> {
         let residual = x.clone();
         let x = self.attention_norm.forward(x);
         let x = self.attention.forward(x, rope, offset, true)?;
@@ -393,10 +401,10 @@ impl Q4EncoderLayer {
     /// Forward pass with KV cache.
     pub fn forward_with_cache(
         &self,
-        x: Tensor<Wgpu, 3>,
-        rope: &RoPE<Wgpu>,
-        cache: &mut KVCache<Wgpu>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        x: Tensor<ActiveBackend, 3>,
+        rope: &RoPE<ActiveBackend>,
+        cache: &mut KVCache<ActiveBackend>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let residual = x.clone();
         let x = self.attention_norm.forward(x);
         let x = self.attention.forward_with_cache(x, rope, cache, true)?;
@@ -416,19 +424,19 @@ impl Q4EncoderLayer {
 /// Decoder transformer layer with Q4-quantized weights and ADA modulation.
 pub struct Q4DecoderLayer {
     ada_rms_norm: Q4AdaRmsNorm,
-    attention_norm: RmsNorm<Wgpu>,
-    attention: Q4Attention,
-    ffn_norm: RmsNorm<Wgpu>,
-    ffn: Q4FeedForward,
+    attention_norm: RmsNorm<ActiveBackend>,
+    pub(crate) attention: Q4Attention,
+    ffn_norm: RmsNorm<ActiveBackend>,
+    pub(crate) ffn: Q4FeedForward,
 }
 
 impl Q4DecoderLayer {
     /// Create a new Q4 decoder layer.
     pub fn new(
         ada_rms_norm: Q4AdaRmsNorm,
-        attention_norm: RmsNorm<Wgpu>,
+        attention_norm: RmsNorm<ActiveBackend>,
         attention: Q4Attention,
-        ffn_norm: RmsNorm<Wgpu>,
+        ffn_norm: RmsNorm<ActiveBackend>,
         ffn: Q4FeedForward,
     ) -> Self {
         Self {
@@ -443,11 +451,11 @@ impl Q4DecoderLayer {
     /// Forward pass.
     pub fn forward(
         &self,
-        x: Tensor<Wgpu, 3>,
-        t_embed: Tensor<Wgpu, 3>,
-        rope: &RoPE<Wgpu>,
+        x: Tensor<ActiveBackend, 3>,
+        t_embed: Tensor<ActiveBackend, 3>,
+        rope: &RoPE<ActiveBackend>,
         offset: usize,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let residual = x.clone();
         let x = self.attention_norm.forward(x);
         let x = self.attention.forward(x, rope, offset, true)?;
@@ -463,11 +471,11 @@ impl Q4DecoderLayer {
     /// Forward pass with KV cache.
     pub fn forward_with_cache(
         &self,
-        x: Tensor<Wgpu, 3>,
-        t_embed: Tensor<Wgpu, 3>,
-        rope: &RoPE<Wgpu>,
-        cache: &mut KVCache<Wgpu>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        x: Tensor<ActiveBackend, 3>,
+        t_embed: Tensor<ActiveBackend, 3>,
+        rope: &RoPE<ActiveBackend>,
+        cache: &mut KVCache<ActiveBackend>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let residual = x.clone();
         let x = self.attention_norm.forward(x);
         let x = self.attention.forward_with_cache(x, rope, cache, true)?;
@@ -489,19 +497,19 @@ impl Q4DecoderLayer {
 ///
 /// Conv downsampler stays f32 (small: ~1 MB).
 pub struct Q4AudioEncoder {
-    conv: ConvDownsampler<Wgpu>,
-    rope: RoPE<Wgpu>,
+    conv: ConvDownsampler<ActiveBackend>,
+    rope: RoPE<ActiveBackend>,
     layers: Vec<Q4EncoderLayer>,
-    norm: RmsNorm<Wgpu>,
+    norm: RmsNorm<ActiveBackend>,
 }
 
 impl Q4AudioEncoder {
     /// Create a new Q4 audio encoder.
     pub fn new(
-        conv: ConvDownsampler<Wgpu>,
-        rope: RoPE<Wgpu>,
+        conv: ConvDownsampler<ActiveBackend>,
+        rope: RoPE<ActiveBackend>,
         layers: Vec<Q4EncoderLayer>,
-        norm: RmsNorm<Wgpu>,
+        norm: RmsNorm<ActiveBackend>,
     ) -> Self {
         Self {
             conv,
@@ -516,7 +524,7 @@ impl Q4AudioEncoder {
     /// # Arguments
     /// * `mel` - Mel spectrogram `[batch, n_mels, time]`
     /// * `offset` - Position offset for KV cache
-    pub fn forward(&self, mel: Tensor<Wgpu, 3>, offset: usize) -> Result<Tensor<Wgpu, 3>, String> {
+    pub fn forward(&self, mel: Tensor<ActiveBackend, 3>, offset: usize) -> Result<Tensor<ActiveBackend, 3>, String> {
         let x = self.conv.forward(mel);
         let x = x.swap_dims(1, 2);
 
@@ -530,9 +538,9 @@ impl Q4AudioEncoder {
     /// Forward pass with KV cache.
     pub fn forward_with_cache(
         &self,
-        mel: Tensor<Wgpu, 3>,
-        caches: &mut LayerCaches<Wgpu>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        mel: Tensor<ActiveBackend, 3>,
+        caches: &mut LayerCaches<ActiveBackend>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let x = self.conv.forward(mel);
         let x = x.swap_dims(1, 2);
 
@@ -551,7 +559,7 @@ impl Q4AudioEncoder {
     }
 
     /// Create a new KV cache for this encoder.
-    pub fn create_cache(&self) -> LayerCaches<Wgpu> {
+    pub fn create_cache(&self) -> LayerCaches<ActiveBackend> {
         LayerCaches::new(self.layers.len())
     }
 }
@@ -568,7 +576,7 @@ impl Q4AudioEncoder {
 ///   copy for embed_tokens row lookups. Used on WASM where a single GPU
 ///   buffer > ~256 MB is rejected by WebGPU.
 pub(crate) enum TokEmbedStore {
-    F32(Tensor<Wgpu, 2>),
+    F32(Tensor<ActiveBackend, 2>),
     Q4 {
         lm_head: Q4Linear,
         cpu_bytes: Vec<u8>,
@@ -578,20 +586,20 @@ pub(crate) enum TokEmbedStore {
 /// Language model decoder with Q4-quantized transformer layers.
 pub struct Q4LanguageModel {
     tok_embeddings: TokEmbedStore,
-    rope: RoPE<Wgpu>,
+    rope: RoPE<ActiveBackend>,
     layers: Vec<Q4DecoderLayer>,
-    norm: RmsNorm<Wgpu>,
+    norm: RmsNorm<ActiveBackend>,
     d_model: usize,
-    device: WgpuDevice,
+    device: ActiveDevice,
 }
 
 impl Q4LanguageModel {
     /// Create a new Q4 language model with f32 token embeddings.
     pub fn new(
-        tok_embeddings: Tensor<Wgpu, 2>,
-        rope: RoPE<Wgpu>,
+        tok_embeddings: Tensor<ActiveBackend, 2>,
+        rope: RoPE<ActiveBackend>,
         layers: Vec<Q4DecoderLayer>,
-        norm: RmsNorm<Wgpu>,
+        norm: RmsNorm<ActiveBackend>,
     ) -> Self {
         let d_model = tok_embeddings.dims()[1];
         let device = tok_embeddings.device();
@@ -614,14 +622,18 @@ impl Q4LanguageModel {
         tok_embed_q4: super::tensor::Q4Tensor,
         tok_embed_bytes: Vec<u8>,
         d_model: usize,
-        device: WgpuDevice,
-        rope: RoPE<Wgpu>,
+        device: ActiveDevice,
+        rope: RoPE<ActiveBackend>,
         layers: Vec<Q4DecoderLayer>,
-        norm: RmsNorm<Wgpu>,
+        norm: RmsNorm<ActiveBackend>,
     ) -> Self {
+        #[cfg(feature = "wgpu")]
+        let lm_head = Q4Linear::new(tok_embed_q4, None);
+        #[cfg(not(feature = "wgpu"))]
+        let lm_head = Q4Linear::new(tok_embed_q4, None, &device, DequantPrecision::F16);
         Self {
             tok_embeddings: TokEmbedStore::Q4 {
-                lm_head: Q4Linear::new(tok_embed_q4, None),
+                lm_head,
                 cpu_bytes: tok_embed_bytes,
             },
             rope,
@@ -637,7 +649,7 @@ impl Q4LanguageModel {
     /// On the Q4 path, this reads token IDs back from the GPU synchronously,
     /// which panics on WASM. Use [`embed_tokens_from_ids`](Self::embed_tokens_from_ids)
     /// when the IDs are known on the CPU.
-    pub fn embed_tokens(&self, token_ids: Tensor<Wgpu, 2, Int>) -> Result<Tensor<Wgpu, 3>, String> {
+    pub fn embed_tokens(&self, token_ids: Tensor<ActiveBackend, 2, Int>) -> Result<Tensor<ActiveBackend, 3>, String> {
         match &self.tok_embeddings {
             TokEmbedStore::F32(embed) => {
                 let [batch, seq] = token_ids.dims();
@@ -657,10 +669,10 @@ impl Q4LanguageModel {
     }
 
     /// Embed token IDs from a CPU slice — avoids GPU readback (safe on WASM).
-    pub fn embed_tokens_from_ids(&self, ids: &[i32], batch: usize, seq: usize) -> Tensor<Wgpu, 3> {
+    pub fn embed_tokens_from_ids(&self, ids: &[i32], batch: usize, seq: usize) -> Tensor<ActiveBackend, 3> {
         match &self.tok_embeddings {
             TokEmbedStore::F32(embed) => {
-                let id_tensor = Tensor::<Wgpu, 2, Int>::from_data(
+                let id_tensor = Tensor::<ActiveBackend, 2, Int>::from_data(
                     TensorData::new(ids.to_vec(), [batch, seq]),
                     &self.device,
                 );
@@ -681,7 +693,7 @@ impl Q4LanguageModel {
         ids: &[i32],
         batch: usize,
         seq: usize,
-    ) -> Tensor<Wgpu, 3> {
+    ) -> Tensor<ActiveBackend, 3> {
         let blocks_per_row = self.d_model / 32;
         let bytes_per_row = blocks_per_row * 18;
         let mut output = vec![0.0f32; ids.len() * self.d_model];
@@ -714,10 +726,10 @@ impl Q4LanguageModel {
     /// Forward pass returning hidden states (before LM head).
     pub fn forward(
         &self,
-        token_ids: Tensor<Wgpu, 2, Int>,
-        t_embed: Tensor<Wgpu, 3>,
+        token_ids: Tensor<ActiveBackend, 2, Int>,
+        t_embed: Tensor<ActiveBackend, 3>,
         offset: usize,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let x = self.embed_tokens(token_ids)?;
         self.forward_hidden_inner(x, t_embed, offset)
     }
@@ -725,19 +737,19 @@ impl Q4LanguageModel {
     /// Forward pass with hidden states input (for multimodal).
     pub fn forward_hidden(
         &self,
-        hidden_states: Tensor<Wgpu, 3>,
-        t_embed: Tensor<Wgpu, 3>,
+        hidden_states: Tensor<ActiveBackend, 3>,
+        t_embed: Tensor<ActiveBackend, 3>,
         offset: usize,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         self.forward_hidden_inner(hidden_states, t_embed, offset)
     }
 
     fn forward_hidden_inner(
         &self,
-        mut x: Tensor<Wgpu, 3>,
-        t_embed: Tensor<Wgpu, 3>,
+        mut x: Tensor<ActiveBackend, 3>,
+        t_embed: Tensor<ActiveBackend, 3>,
         offset: usize,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         for layer in &self.layers {
             x = layer.forward(x, t_embed.clone(), &self.rope, offset)?;
         }
@@ -747,10 +759,10 @@ impl Q4LanguageModel {
     /// Forward pass with KV cache.
     pub fn forward_with_cache(
         &self,
-        token_ids: Tensor<Wgpu, 2, Int>,
-        t_embed: Tensor<Wgpu, 3>,
-        caches: &mut LayerCaches<Wgpu>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        token_ids: Tensor<ActiveBackend, 2, Int>,
+        t_embed: Tensor<ActiveBackend, 3>,
+        caches: &mut LayerCaches<ActiveBackend>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let x = self.embed_tokens(token_ids)?;
         self.forward_hidden_with_cache(x, t_embed, caches)
     }
@@ -758,10 +770,10 @@ impl Q4LanguageModel {
     /// Forward pass with hidden states input and KV cache.
     pub fn forward_hidden_with_cache(
         &self,
-        mut x: Tensor<Wgpu, 3>,
-        t_embed: Tensor<Wgpu, 3>,
-        caches: &mut LayerCaches<Wgpu>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        mut x: Tensor<ActiveBackend, 3>,
+        t_embed: Tensor<ActiveBackend, 3>,
+        caches: &mut LayerCaches<ActiveBackend>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         for (i, layer) in self.layers.iter().enumerate() {
             if let Some(cache) = caches.get_mut(i) {
                 x = layer.forward_with_cache(x, t_embed.clone(), &self.rope, cache)?;
@@ -771,7 +783,7 @@ impl Q4LanguageModel {
     }
 
     /// Compute logits from hidden states (LM head with tied embeddings).
-    pub fn lm_head(&self, hidden_states: Tensor<Wgpu, 3>) -> Result<Tensor<Wgpu, 3>, String> {
+    pub fn lm_head(&self, hidden_states: Tensor<ActiveBackend, 3>) -> Result<Tensor<ActiveBackend, 3>, String> {
         match &self.tok_embeddings {
             TokEmbedStore::F32(embed) => {
                 let [batch, seq, _] = hidden_states.dims();
@@ -795,14 +807,14 @@ impl Q4LanguageModel {
     }
 
     /// Create a new KV cache for this decoder.
-    pub fn create_cache(&self) -> LayerCaches<Wgpu> {
+    pub fn create_cache(&self) -> LayerCaches<ActiveBackend> {
         LayerCaches::new(self.layers.len())
     }
 
     /// Create a pre-allocated KV cache sized for the given max sequence length.
     ///
     /// Avoids per-step GPU allocations by writing into fixed buffers.
-    pub fn create_cache_preallocated(&self, max_seq: usize) -> LayerCaches<Wgpu> {
+    pub fn create_cache_preallocated(&self, max_seq: usize) -> LayerCaches<ActiveBackend> {
         // Decoder uses GQA: 8 KV heads, head_dim = d_model / n_heads = 3072 / 32 = 96
         let n_kv_heads = self.layers.first().map_or(8, |l| l.attention.n_kv_heads);
         let head_dim = self.layers.first().map_or(96, |l| l.attention.head_dim);
@@ -836,7 +848,7 @@ impl Q4Adapter {
     }
 
     /// Forward pass.
-    pub fn forward(&self, x: Tensor<Wgpu, 3>) -> Result<Tensor<Wgpu, 3>, String> {
+    pub fn forward(&self, x: Tensor<ActiveBackend, 3>) -> Result<Tensor<ActiveBackend, 3>, String> {
         let x = self.linear1.forward(x)?;
         let x = gelu(x);
         self.linear2.forward(x)
@@ -874,7 +886,7 @@ impl Q4VoxtralModel {
     }
 
     /// Encode audio to hidden states ready for the LLM.
-    pub fn encode_audio(&self, mel: Tensor<Wgpu, 3>) -> Result<Tensor<Wgpu, 3>, String> {
+    pub fn encode_audio(&self, mel: Tensor<ActiveBackend, 3>) -> Result<Tensor<ActiveBackend, 3>, String> {
         let _span = tracing::info_span!("encode_audio").entered();
         let encoder_out = self.encoder.forward(mel, 0)?;
         let reshaped = reshape_encoder_output(encoder_out, self.reshape_factor);
@@ -884,9 +896,9 @@ impl Q4VoxtralModel {
     /// Encode audio with KV cache.
     pub fn encode_audio_with_cache(
         &self,
-        mel: Tensor<Wgpu, 3>,
-        encoder_cache: &mut LayerCaches<Wgpu>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        mel: Tensor<ActiveBackend, 3>,
+        encoder_cache: &mut LayerCaches<ActiveBackend>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let encoder_out = self.encoder.forward_with_cache(mel, encoder_cache)?;
         let reshaped = reshape_encoder_output(encoder_out, self.reshape_factor);
         self.adapter.forward(reshaped)
@@ -895,10 +907,10 @@ impl Q4VoxtralModel {
     /// Full forward pass from mel to logits (streaming transcription mode).
     pub fn forward_streaming(
         &self,
-        mel: Tensor<Wgpu, 3>,
-        token_ids: Tensor<Wgpu, 2, Int>,
-        t_embed_decoder: Tensor<Wgpu, 3>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        mel: Tensor<ActiveBackend, 3>,
+        token_ids: Tensor<ActiveBackend, 2, Int>,
+        t_embed_decoder: Tensor<ActiveBackend, 3>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let audio_embeds = self.encode_audio(mel)?;
         let text_embeds = self.decoder.embed_tokens(token_ids)?;
         let inputs_embeds = audio_embeds + text_embeds;
@@ -911,9 +923,9 @@ impl Q4VoxtralModel {
     /// Full forward pass from mel to logits (without text tokens).
     pub fn forward(
         &self,
-        mel: Tensor<Wgpu, 3>,
-        t_embed_decoder: Tensor<Wgpu, 3>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        mel: Tensor<ActiveBackend, 3>,
+        t_embed_decoder: Tensor<ActiveBackend, 3>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let audio_hidden = self.encode_audio(mel)?;
         let hidden = self
             .decoder
@@ -924,11 +936,11 @@ impl Q4VoxtralModel {
     /// Full forward pass with KV caches.
     pub fn forward_with_cache(
         &self,
-        mel: Tensor<Wgpu, 3>,
-        t_embed_decoder: Tensor<Wgpu, 3>,
-        encoder_cache: &mut LayerCaches<Wgpu>,
-        decoder_cache: &mut LayerCaches<Wgpu>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        mel: Tensor<ActiveBackend, 3>,
+        t_embed_decoder: Tensor<ActiveBackend, 3>,
+        encoder_cache: &mut LayerCaches<ActiveBackend>,
+        decoder_cache: &mut LayerCaches<ActiveBackend>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let audio_hidden = self.encode_audio_with_cache(mel, encoder_cache)?;
         let hidden =
             self.decoder
@@ -939,10 +951,10 @@ impl Q4VoxtralModel {
     /// Continue generation from text tokens (no cache).
     pub fn generate_step(
         &self,
-        token_ids: Tensor<Wgpu, 2, Int>,
-        t_embed: Tensor<Wgpu, 3>,
+        token_ids: Tensor<ActiveBackend, 2, Int>,
+        t_embed: Tensor<ActiveBackend, 3>,
         offset: usize,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let hidden = self.decoder.forward(token_ids, t_embed, offset)?;
         self.decoder.lm_head(hidden)
     }
@@ -950,10 +962,10 @@ impl Q4VoxtralModel {
     /// Autoregressive generation step with KV cache.
     pub fn generate_step_with_cache(
         &self,
-        token_ids: Tensor<Wgpu, 2, Int>,
-        t_embed: Tensor<Wgpu, 3>,
-        decoder_cache: &mut LayerCaches<Wgpu>,
-    ) -> Result<Tensor<Wgpu, 3>, String> {
+        token_ids: Tensor<ActiveBackend, 2, Int>,
+        t_embed: Tensor<ActiveBackend, 3>,
+        decoder_cache: &mut LayerCaches<ActiveBackend>,
+    ) -> Result<Tensor<ActiveBackend, 3>, String> {
         let hidden = self
             .decoder
             .forward_with_cache(token_ids, t_embed, decoder_cache)?;
@@ -966,8 +978,8 @@ impl Q4VoxtralModel {
     /// for details on the position-38 anomaly and token meanings.
     pub fn transcribe_streaming(
         &self,
-        mel: Tensor<Wgpu, 3>,
-        t_embed_decoder: Tensor<Wgpu, 3>,
+        mel: Tensor<ActiveBackend, 3>,
+        t_embed_decoder: Tensor<ActiveBackend, 3>,
     ) -> Result<Vec<i32>, String> {
         let _span = tracing::info_span!("transcribe_streaming").entered();
 
@@ -1021,7 +1033,7 @@ impl Q4VoxtralModel {
 
         // Pre-slice all audio positions to avoid cloning the full audio_embeds
         // tensor every decode step.
-        let audio_slices: Vec<Tensor<Wgpu, 3>> = (PREFIX_LEN..seq_len)
+        let audio_slices: Vec<Tensor<ActiveBackend, 3>> = (PREFIX_LEN..seq_len)
             .map(|pos| audio_embeds.clone().slice([0..1, pos..pos + 1, 0..d_model]))
             .collect();
         // audio_embeds no longer needed — drop to free GPU memory
@@ -1067,17 +1079,17 @@ impl Q4VoxtralModel {
     }
 
     /// Create KV caches for the encoder.
-    pub fn create_encoder_cache(&self) -> LayerCaches<Wgpu> {
+    pub fn create_encoder_cache(&self) -> LayerCaches<ActiveBackend> {
         self.encoder.create_cache()
     }
 
     /// Create KV caches for the decoder.
-    pub fn create_decoder_cache(&self) -> LayerCaches<Wgpu> {
+    pub fn create_decoder_cache(&self) -> LayerCaches<ActiveBackend> {
         self.decoder.create_cache()
     }
 
     /// Create pre-allocated KV caches for the decoder.
-    pub fn create_decoder_cache_preallocated(&self, max_seq: usize) -> LayerCaches<Wgpu> {
+    pub fn create_decoder_cache_preallocated(&self, max_seq: usize) -> LayerCaches<ActiveBackend> {
         self.decoder.create_cache_preallocated(max_seq)
     }
 }

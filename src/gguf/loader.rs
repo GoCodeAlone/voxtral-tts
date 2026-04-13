@@ -22,6 +22,8 @@ use crate::models::weights::{
     encoder_layer_weight_names, prefixes,
 };
 
+#[cfg(not(feature = "wgpu"))]
+use super::op::DequantPrecision;
 use super::linear::Q4Linear;
 use super::model::{
     Q4AdaRmsNorm, Q4Adapter, Q4Attention, Q4AudioEncoder, Q4DecoderLayer, Q4EncoderLayer,
@@ -55,8 +57,12 @@ impl Q4ModelParts {
         let [vocab, d_model] = self.tok_embed_shape;
 
         // Create Q4Tensor on GPU for the lm_head matmul
+        #[cfg(feature = "wgpu")]
         let tok_embed_q4 =
             Q4Tensor::from_q4_bytes(&self.tok_embed_q4_bytes, [vocab, d_model], device)?;
+        #[cfg(not(feature = "wgpu"))]
+        let tok_embed_q4 =
+            Q4Tensor::from_q4_bytes(&self.tok_embed_q4_bytes, [vocab, d_model])?;
 
         let decoder = Q4LanguageModel::new_q4_embeddings(
             tok_embed_q4,
@@ -442,8 +448,14 @@ pub(crate) fn gguf_load_q4_linear<R: Read + Seek>(
 
     let shape = reverse_gguf_dims(info.shape());
     let bytes = reader.tensor_data(name)?;
+    #[cfg(feature = "wgpu")]
     let q4 = Q4Tensor::from_q4_bytes(&bytes, [shape[0], shape[1]], device)?;
-    Ok(Q4Linear::new(q4, None))
+    #[cfg(not(feature = "wgpu"))]
+    let q4 = Q4Tensor::from_q4_bytes(&bytes, [shape[0], shape[1]])?;
+    #[cfg(feature = "wgpu")]
+    return Ok(Q4Linear::new(q4, None));
+    #[cfg(not(feature = "wgpu"))]
+    return Ok(Q4Linear::new(q4, None, device, DequantPrecision::F16));
 }
 
 /// Load a Q4_0 tensor with an optional F32 bias as a [`Q4Linear`].
@@ -464,7 +476,10 @@ pub(crate) fn gguf_load_q4_linear_with_optional_bias<R: Read + Seek>(
 
     let shape = reverse_gguf_dims(info.shape());
     let bytes = reader.tensor_data(weight_name)?;
+    #[cfg(feature = "wgpu")]
     let q4 = Q4Tensor::from_q4_bytes(&bytes, [shape[0], shape[1]], device)?;
+    #[cfg(not(feature = "wgpu"))]
+    let q4 = Q4Tensor::from_q4_bytes(&bytes, [shape[0], shape[1]])?;
 
     let bias = if let Some(bias_name) = bias_name {
         if reader.tensor_info(bias_name).is_some() {
@@ -477,7 +492,10 @@ pub(crate) fn gguf_load_q4_linear_with_optional_bias<R: Read + Seek>(
         None
     };
 
-    Ok(Q4Linear::new(q4, bias))
+    #[cfg(feature = "wgpu")]
+    return Ok(Q4Linear::new(q4, bias));
+    #[cfg(not(feature = "wgpu"))]
+    return Ok(Q4Linear::new(q4, bias, device, DequantPrecision::F16));
 }
 
 /// Load an F32/F16 tensor from GGUF.

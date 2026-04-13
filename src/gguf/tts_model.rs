@@ -233,14 +233,17 @@ impl Q4TtsBackbone {
     /// Total: 26 layers × 3 fewer launches = 78 fewer kernel launches per frame.
     /// One-time cost at model load.
     pub fn fuse_projections(&mut self) {
-        for layer in &mut self.layers {
-            layer.attention.fuse_qkv(&self.device);
-            layer.ffn.fuse_gate_up(&self.device);
+        #[cfg(feature = "wgpu")]
+        {
+            for layer in &mut self.layers {
+                layer.attention.fuse_qkv(&self.device);
+                layer.ffn.fuse_gate_up(&self.device);
+            }
+            tracing::info!(
+                layers = self.layers.len(),
+                "Fused QKV + gate/up projections in backbone"
+            );
         }
-        tracing::info!(
-            layers = self.layers.len(),
-            "Fused QKV + gate/up projections in backbone"
-        );
     }
 
     /// Number of layers.
