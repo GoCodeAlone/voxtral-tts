@@ -1,16 +1,16 @@
 # voxtral-tts
 
-**Streaming TTS lib crate for [Core Dump](https://github.com/GoCodeAlone/core-dump).**
+**Streaming TTS lib crate** — optimized for real-time applications that need low-latency speech synthesis.
 
 Forked from [TrevorS/voxtral-mini-realtime-rs](https://github.com/TrevorS/voxtral-mini-realtime-rs) — a pure-Rust implementation of Mistral's [Voxtral 4B TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) using the [Burn](https://burn.dev) ML framework with wgpu GPU acceleration.
 
 ## Why This Fork Exists
 
-The upstream repo is a full-featured CLI application with ASR, TTS, WASM browser support, HuggingFace Hub downloads, and sharded model loading. Core Dump needs a focused **lib crate** optimized for real-time game dialogue — specifically:
+The upstream repo is a full-featured CLI application with ASR, TTS, WASM browser support, HuggingFace Hub downloads, and sharded model loading. This fork strips it down to a focused **lib crate** optimized for real-time audio streaming:
 
 1. **Streaming audio output** — the upstream collects all frames into a Vec, then writes a WAV file. This fork streams audio frame-by-frame through a ring buffer to cpal, so playback begins ~80ms after the first frame generates (on hardware with RTF < 1.0x).
 
-2. **No CLI, no browser, no downloads** — stripped the binary targets, clap/indicatif, WASM/wasm-bindgen, HuggingFace Hub fetching, and sharded model loading. Models ship via Steam depot.
+2. **No CLI, no browser, no downloads** — stripped the binary targets, clap/indicatif, WASM/wasm-bindgen, HuggingFace Hub fetching, and sharded model loading. Models are managed by the consuming application.
 
 3. **Ring buffer + cpal integration** — `AudioRingBuffer` with Mutex/Condvar backpressure feeds a persistent cpal output stream. The stream stays open across utterances (no per-call open/close overhead).
 
