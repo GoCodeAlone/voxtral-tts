@@ -48,6 +48,7 @@ flate2 = "1.1"
 half = "2.7"
 memmap2 = "0.9"
 rustc-hash = "1.1"
+cpal = "0.15"
 
 # NDArray for test data loading
 ndarray = "0.16"

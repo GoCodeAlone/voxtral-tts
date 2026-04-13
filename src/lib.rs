@@ -4,6 +4,7 @@
 //! Three-stage pipeline: Q4 Ministral backbone → flow-matching transformer → codec decoder → 24 kHz PCM.
 
 pub mod audio;
+pub mod audio_output;
 pub mod ring_buffer;
 #[cfg(feature = "wgpu")]
 pub mod gguf;
@@ -17,6 +18,7 @@ mod test_utils;
 
 // Re-exports
 pub use audio::AudioBuffer;
+pub use audio_output::AudioOutputStream;
 pub use ring_buffer::AudioRingBuffer;
 pub use tts::backbone::{GeneratedFrame, TtsBackbone};
 pub use tts::pipeline::TtsPipeline;
