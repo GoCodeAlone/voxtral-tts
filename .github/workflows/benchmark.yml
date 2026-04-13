@@ -26,26 +26,34 @@ jobs:
     timeout-minutes: 30
     env:
       CORE_DUMP_MODEL_DIR: ${{ vars.VOICE_MODEL_DIR }}
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-nextest
+        shell: bash
+        run: |
+          cargo install cargo-nextest --locked 2>/dev/null || true
+
       - name: Run RTF benchmark
         shell: bash
         run: |
           set -o pipefail
-          cargo test --release --features "${{ matrix.features }}" -- benchmark_tts_rtf --nocapture 2>&1 | tee benchmark-output.txt
+          # Use bench profile (no LTO) + single test binary to avoid link contention
+          cargo nextest run --profile bench --features "${{ matrix.features }}" \
+            -E 'test(benchmark_tts_rtf)' --nocapture 2>&1 | tee benchmark-output.txt || \
+          cargo test --profile bench --features "${{ matrix.features }}" \
+            --test benchmark_tts_rtf -- --nocapture 2>&1 | tee benchmark-output.txt
 
       - name: Parse and check regression
         shell: bash
         run: |
-          # Extract avg RTF from benchmark output
           AVG_RTF=$(grep "Summary:" benchmark-output.txt | sed -n 's/.*avg=\([0-9.]*\)x.*/\1/p')
           echo "Current avg RTF: ${AVG_RTF:-unknown}"
 
-          # Check baseline if it exists
           if [ -f benchmarks/baseline-${{ matrix.platform }}.json ]; then
             BASELINE_RTF=$(python3 -c "import json; print(json.load(open('benchmarks/baseline-${{ matrix.platform }}.json'))['rtf_avg'])" 2>/dev/null || echo "")
             if [ -n "$BASELINE_RTF" ] && [ -n "$AVG_RTF" ]; then
