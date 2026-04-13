@@ -8,7 +8,7 @@ pub mod audio_output;
 pub mod backend;
 pub mod engine;
 pub mod ring_buffer;
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu", feature = "cuda", feature = "metal"))]
 pub mod gguf;
 pub mod models;
 pub mod profiling;

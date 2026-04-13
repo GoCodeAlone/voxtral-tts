@@ -206,26 +206,52 @@ fn dispatch_naive(
         .map_err(|e| format!("Q4 naive matmul kernel launch failed: {e}"))
 }
 
+/// Precision to use when dequantizing Q4_0 weights for non-wgpu backends.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum DequantPrecision {
+    /// Dequantize to f32 (default — maximum compatibility).
+    #[default]
+    F32,
+    /// Dequantize to f16 (faster on Metal/CUDA with fp16 matmul units).
+    F16,
+}
+
 /// Q4_0 dequant+matmul for non-wgpu backends (cuda/metal/rocm).
 ///
-/// Dequantizes Q4_0 weights to f32 on CPU, uploads to the target backend,
-/// then uses Burn's native matmul (cuBLAS on CUDA, MPSGraph on Metal).
-/// For wgpu backends use the WGSL shader variant above which dequantizes on GPU.
+/// Dequantizes Q4_0 weights on CPU to the requested precision, uploads to the
+/// target backend, then uses Burn's native matmul (cuBLAS on CUDA, MPSGraph on
+/// Metal).  For wgpu builds use the WGSL shader variant above which dequantizes
+/// on GPU.
 #[cfg(not(feature = "wgpu"))]
 pub fn q4_matmul<B: burn::tensor::backend::Backend>(
     input: burn::tensor::Tensor<B, 3>,
     weights: &Q4Tensor,
     device: &B::Device,
+    precision: DequantPrecision,
 ) -> Result<burn::tensor::Tensor<B, 3>, String> {
     let [n, k] = weights.shape();
-    let dequantized = weights.dequantize_f32();
-    let weight_tensor = burn::tensor::Tensor::<B, 2>::from_data(
-        burn::tensor::TensorData::new(dequantized, [n, k]),
-        device,
-    );
     let dims = input.dims();
     let (b, m) = (dims[0], dims[1]);
     let input_2d = input.reshape([b * m, k]);
+
+    // Upload dequantized weights at the requested precision.
+    // burn's F16 element type requires burn::tensor::f16; we always upload as
+    // f32 data and let the backend cast — burn TensorData::new is typed on the
+    // Rust element type, and non-wgpu backends may not yet expose half directly
+    // through the public API.  F16 path: dequant in f16 arithmetic, then widen
+    // to f32 for the upload (avoids double-precision round-trip through f64).
+    let weight_f32: Vec<f32> = match precision {
+        DequantPrecision::F32 => weights.dequantize_f32(),
+        DequantPrecision::F16 => weights
+            .dequantize_f16()
+            .into_iter()
+            .map(|v| v.to_f32())
+            .collect(),
+    };
+    let weight_tensor = burn::tensor::Tensor::<B, 2>::from_data(
+        burn::tensor::TensorData::new(weight_f32, [n, k]),
+        device,
+    );
     let output_2d = input_2d.matmul(weight_tensor.transpose());
     Ok(output_2d.reshape([b, m, n]))
 }

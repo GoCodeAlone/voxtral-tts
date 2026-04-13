@@ -5,8 +5,8 @@
 //! file I/O and in-memory bytes for WASM deployment.
 
 use anyhow::{Context, Result};
-use burn::backend::wgpu::WgpuDevice;
-use burn::backend::Wgpu;
+use crate::backend::{ActiveBackend, ActiveDevice};
+
 use burn::tensor::{Tensor, TensorData};
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek};
@@ -39,15 +39,15 @@ use super::tts_model::{Q4FmLayer, Q4FmTransformer, Q4TtsBackbone, Q4TtsDecoderLa
 /// reader's memory before dequantizing the 131K-vocab embedding table.
 pub struct Q4TtsModelParts {
     pub backbone_layers: Vec<Q4TtsDecoderLayer>,
-    pub backbone_rope: RoPE<Wgpu>,
-    pub backbone_norm: RmsNorm<Wgpu>,
-    pub audio_codebook_embeddings: Tensor<Wgpu, 2>,
+    pub backbone_rope: RoPE<ActiveBackend>,
+    pub backbone_norm: RmsNorm<ActiveBackend>,
+    pub audio_codebook_embeddings: Tensor<ActiveBackend, 2>,
     pub fm: Q4FmTransformer,
-    pub codec: CodecDecoder<Wgpu>,
+    pub codec: CodecDecoder<ActiveBackend>,
     pub tok_embed_q4_bytes: Vec<u8>,
     pub tok_embed_shape: [usize; 2],
     pub config: TtsBackboneConfig,
-    pub device: WgpuDevice,
+    pub device: ActiveDevice,
 }
 
 impl Q4TtsModelParts {
@@ -55,7 +55,7 @@ impl Q4TtsModelParts {
     ///
     /// Keeps embeddings as Q4 on GPU (~216 MB) for the lm_head, with a CPU
     /// copy for embed_tokens row lookups.
-    pub fn finalize(self) -> Result<(Q4TtsBackbone, Q4FmTransformer, CodecDecoder<Wgpu>)> {
+    pub fn finalize(self) -> Result<(Q4TtsBackbone, Q4FmTransformer, CodecDecoder<ActiveBackend>)> {
         let [vocab, d_model] = self.tok_embed_shape;
 
         let tok_embed_q4 =
@@ -123,8 +123,8 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
     /// Load the complete Q4 TTS model.
     pub fn load(
         &mut self,
-        device: &WgpuDevice,
-    ) -> Result<(Q4TtsBackbone, Q4FmTransformer, CodecDecoder<Wgpu>)> {
+        device: &ActiveDevice,
+    ) -> Result<(Q4TtsBackbone, Q4FmTransformer, CodecDecoder<ActiveBackend>)> {
         info!(
             version = self.reader.version(),
             tensors = self.reader.tensor_count(),
@@ -169,7 +169,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
     /// Load model components without dequantizing token embeddings.
     ///
     /// Returns [`Q4TtsModelParts`] for two-phase WASM loading.
-    pub fn load_deferred(&mut self, device: &WgpuDevice) -> Result<Q4TtsModelParts> {
+    pub fn load_deferred(&mut self, device: &ActiveDevice) -> Result<Q4TtsModelParts> {
         info!(
             version = self.reader.version(),
             tensors = self.reader.tensor_count(),
@@ -226,8 +226,8 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
     fn load_backbone(
         &mut self,
         config: &TtsBackboneConfig,
-        device: &WgpuDevice,
-    ) -> Result<(Vec<Q4TtsDecoderLayer>, RoPE<Wgpu>, RmsNorm<Wgpu>)> {
+        device: &ActiveDevice,
+    ) -> Result<(Vec<Q4TtsDecoderLayer>, RoPE<ActiveBackend>, RmsNorm<ActiveBackend>)> {
         let rope = RoPEConfig::new(config.head_dim, 131_072)
             .with_theta(config.rope_theta)
             .init(device);
@@ -250,7 +250,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
         &mut self,
         layer_idx: usize,
         config: &TtsBackboneConfig,
-        device: &WgpuDevice,
+        device: &ActiveDevice,
     ) -> Result<Q4TtsDecoderLayer> {
         let prefix = format!("layers.{layer_idx}");
 
@@ -329,7 +329,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
     fn load_fm_transformer(
         &mut self,
         config: &FmTransformerConfig,
-        device: &WgpuDevice,
+        device: &ActiveDevice,
     ) -> Result<Q4FmTransformer> {
         let prefix = "acoustic_transformer";
 
@@ -349,7 +349,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
         .context("loading time_projection")?;
 
         // input_projection is F32 (tiny: [3072, 36])
-        let input_proj_weight: Tensor<Wgpu, 2> = gguf_load_f32_tensor(
+        let input_proj_weight: Tensor<ActiveBackend, 2> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.input_projection.weight"),
             device,
@@ -366,7 +366,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
         .context("loading semantic_codebook_output")?;
 
         // acoustic_codebook_output is F32 (tiny: [36, 3072])
-        let acoustic_output_weight: Tensor<Wgpu, 2> = gguf_load_f32_tensor(
+        let acoustic_output_weight: Tensor<ActiveBackend, 2> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.acoustic_codebook_output.weight"),
             device,
@@ -418,7 +418,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
         &mut self,
         layer_idx: usize,
         config: &FmTransformerConfig,
-        device: &WgpuDevice,
+        device: &ActiveDevice,
     ) -> Result<Q4FmLayer> {
         let prefix = format!("acoustic_transformer.layers.{layer_idx}");
 
@@ -492,12 +492,12 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
     fn load_codec(
         &mut self,
         config: &CodecDecoderConfig,
-        device: &WgpuDevice,
-    ) -> Result<CodecDecoder<Wgpu>> {
+        device: &ActiveDevice,
+    ) -> Result<CodecDecoder<ActiveBackend>> {
         let prefix = "audio_tokenizer";
 
         // Block 0: Input Conv1d [292→1024, k=3, s=1]
-        let input_conv_weight: Tensor<Wgpu, 3> = gguf_load_f32_tensor(
+        let input_conv_weight: Tensor<ActiveBackend, 3> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.decoder_blocks.0.conv.weight"),
             device,
@@ -531,7 +531,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
         let upsample_block_indices = [2, 4, 6];
         let mut upsample_convs = Vec::with_capacity(3);
         for &block_idx in &upsample_block_indices {
-            let weight: Tensor<Wgpu, 3> = gguf_load_f32_tensor(
+            let weight: Tensor<ActiveBackend, 3> = gguf_load_f32_tensor(
                 &mut self.reader,
                 &format!("{prefix}.decoder_blocks.{block_idx}.conv.weight"),
                 device,
@@ -541,7 +541,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
         }
 
         // Output Conv1d [1024→240, k=7, s=1]
-        let output_conv_weight: Tensor<Wgpu, 3> = gguf_load_f32_tensor(
+        let output_conv_weight: Tensor<ActiveBackend, 3> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.output_proj.conv.weight"),
             device,
@@ -567,28 +567,28 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
         prefix: &str,
         config: &CodecDecoderConfig,
         sliding_window: usize,
-        device: &WgpuDevice,
-    ) -> Result<CodecTransformerLayer<Wgpu>> {
+        device: &ActiveDevice,
+    ) -> Result<CodecTransformerLayer<ActiveBackend>> {
         // Attention weights (all F32)
-        let wq_weight: Tensor<Wgpu, 2> = gguf_load_f32_tensor(
+        let wq_weight: Tensor<ActiveBackend, 2> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.attention.wq.weight"),
             device,
         )
         .context("Loading wq")?;
-        let wk_weight: Tensor<Wgpu, 2> = gguf_load_f32_tensor(
+        let wk_weight: Tensor<ActiveBackend, 2> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.attention.wk.weight"),
             device,
         )
         .context("Loading wk")?;
-        let wv_weight: Tensor<Wgpu, 2> = gguf_load_f32_tensor(
+        let wv_weight: Tensor<ActiveBackend, 2> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.attention.wv.weight"),
             device,
         )
         .context("Loading wv")?;
-        let wo_weight: Tensor<Wgpu, 2> = gguf_load_f32_tensor(
+        let wo_weight: Tensor<ActiveBackend, 2> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.attention.wo.weight"),
             device,
@@ -601,13 +601,13 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
         let wo = linear_from_weights(wo_weight, None);
 
         // QK-norm weights
-        let q_norm_weight: Tensor<Wgpu, 1> = gguf_load_f32_tensor(
+        let q_norm_weight: Tensor<ActiveBackend, 1> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.attention.q_norm.weight"),
             device,
         )
         .context("Loading q_norm")?;
-        let k_norm_weight: Tensor<Wgpu, 1> = gguf_load_f32_tensor(
+        let k_norm_weight: Tensor<ActiveBackend, 1> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.attention.k_norm.weight"),
             device,
@@ -632,13 +632,13 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
         );
 
         // LayerScale weights
-        let attn_scale_weight: Tensor<Wgpu, 1> = gguf_load_f32_tensor(
+        let attn_scale_weight: Tensor<ActiveBackend, 1> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.attention_scale"),
             device,
         )
         .context("Loading attention_scale")?;
-        let ffn_scale_weight: Tensor<Wgpu, 1> =
+        let ffn_scale_weight: Tensor<ActiveBackend, 1> =
             gguf_load_f32_tensor(&mut self.reader, &format!("{prefix}.ffn_scale"), device)
                 .context("Loading ffn_scale")?;
         let attention_scale = LayerScale::new(attn_scale_weight);
@@ -661,17 +661,17 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
         .context("Loading ffn_norm")?;
 
         // SwiGLU FFN (F32)
-        let w1_weight: Tensor<Wgpu, 2> = gguf_load_f32_tensor(
+        let w1_weight: Tensor<ActiveBackend, 2> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.feed_forward.w1.weight"),
             device,
         )?;
-        let w2_weight: Tensor<Wgpu, 2> = gguf_load_f32_tensor(
+        let w2_weight: Tensor<ActiveBackend, 2> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.feed_forward.w2.weight"),
             device,
         )?;
-        let w3_weight: Tensor<Wgpu, 2> = gguf_load_f32_tensor(
+        let w3_weight: Tensor<ActiveBackend, 2> = gguf_load_f32_tensor(
             &mut self.reader,
             &format!("{prefix}.feed_forward.w3.weight"),
             device,
@@ -695,7 +695,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
     ///
     /// Pre-computes normalized embeddings on CPU to avoid GPU readback
     /// (required for WASM compatibility).
-    fn load_vq_codebook(&mut self, device: &WgpuDevice) -> Result<VqCodebook<Wgpu>> {
+    fn load_vq_codebook(&mut self, device: &ActiveDevice) -> Result<VqCodebook<ActiveBackend>> {
         let embed_name = "audio_tokenizer.quantizer.semantic_codebook.embedding_sum";
         let usage_name = "audio_tokenizer.quantizer.semantic_codebook.cluster_usage";
 
@@ -729,12 +729,12 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
 
         // Pre-compute normalized embeddings on CPU (no GPU readback needed)
         let cpu_normalized =
-            VqCodebook::<Wgpu>::precompute_normalized(&embed_f32, &usage_f32, n_entries, embed_dim);
+            VqCodebook::<ActiveBackend>::precompute_normalized(&embed_f32, &usage_f32, n_entries, embed_dim);
 
         // Create GPU tensors
-        let embedding_sum: Tensor<Wgpu, 2> =
+        let embedding_sum: Tensor<ActiveBackend, 2> =
             Tensor::from_data(TensorData::new(embed_f32, embed_shape), device);
-        let cluster_usage: Tensor<Wgpu, 1> =
+        let cluster_usage: Tensor<ActiveBackend, 1> =
             Tensor::from_data(TensorData::new(usage_f32, [n_entries]), device);
 
         Ok(VqCodebook::new(
@@ -745,7 +745,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
     }
 
     /// Load token embeddings (Q4_0 → dequantized f32).
-    fn load_tok_embeddings(&mut self, device: &WgpuDevice) -> Result<Tensor<Wgpu, 2>> {
+    fn load_tok_embeddings(&mut self, device: &ActiveDevice) -> Result<Tensor<ActiveBackend, 2>> {
         let name = "mm_audio_embeddings.tok_embeddings.weight";
         let info = self
             .reader
@@ -769,7 +769,7 @@ impl<R: Read + Seek> Q4TtsModelLoader<R> {
     }
 
     /// Load audio codebook embeddings [9088, 3072] as F32.
-    fn load_audio_codebook_embeddings(&mut self, device: &WgpuDevice) -> Result<Tensor<Wgpu, 2>> {
+    fn load_audio_codebook_embeddings(&mut self, device: &ActiveDevice) -> Result<Tensor<ActiveBackend, 2>> {
         gguf_load_f32_tensor(
             &mut self.reader,
             "mm_audio_embeddings.audio_codebook_embeddings.embeddings.weight",
@@ -844,7 +844,7 @@ mod tests {
             return;
         }
 
-        let device = WgpuDevice::default();
+        let device = ActiveDevice::default();
         let mut loader = Q4TtsModelLoader::from_file(&path).unwrap();
         let (backbone, fm, _codec) = loader.load(&device).unwrap();
 
