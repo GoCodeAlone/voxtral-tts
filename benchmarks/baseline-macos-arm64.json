@@ -1,0 +1,10 @@
+{
+  "platform": "macos-arm64",
+  "date": "2026-04-13",
+  "backend": "wgpu",
+  "euler_steps": 4,
+  "phrases": 10,
+  "wgpu": { "rtf_min": 0.0, "rtf_avg": 0.0, "rtf_max": 0.0, "rtf_p99": 0.0 },
+  "metal": { "rtf_min": 0.0, "rtf_avg": 0.0, "rtf_max": 0.0, "rtf_p99": 0.0 },
+  "note": "Pending: fill in after running release benchmark"
+}
